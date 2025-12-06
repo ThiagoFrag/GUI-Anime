@@ -17,7 +17,14 @@
         // Discord Linking System
         GetDiscordLinkStatus, LinkDiscordWithCode, UnlinkDiscord,
         GetDiscordServerInvite, UpdateDiscordWatchingStatus, GetDiscordFriendsActivity,
-        SetDiscordShowStatus, SetDiscordShareAnimes
+        SetDiscordShowStatus, SetDiscordShareAnimes,
+        // Manga System
+        GetPopularMangas, GetLatestMangas, SearchMangas, GetMangaDetails, GetMangaChapters, GetChapterPages, GetMangasByGenre, GetAllMangasComplete,
+        GetFeaturedMangas, GetAllMangasSafe, GetAllMangasAdult, GetPopularMangasSafe, GetPopularMangasAdult,
+        // Manga Multiple Sources
+        GetMangaSourcesInfo, GetFeaturedMangasFromSource, GetPopularMangasFromSource, GetLatestMangasFromSource, 
+        SearchMangasFromSource, GetAllMangasFromSourceComplete, GetPopularMangasAllSources,
+        GetMergedMangasWithBestSource
     } from '../wailsjs/go/main/App';
     import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime';
 
@@ -56,6 +63,41 @@
     let communityAnimes = [];
     let loadingCommunity = false;
     
+    // === MANGA SYSTEM ===
+    let allMangas = [];  // TODOS os mangás do site (SFW apenas por padrão)
+    let featuredMangas = [];  // Mangás em destaque (24 mangás SFW)
+    let popularMangas = [];
+    let latestMangas = [];
+    let adultMangas = [];  // Mangás +18 (separados)
+    let showAdultContent = false;  // Toggle para exibir conteúdo adulto
+    let mangaSearchResults = [];
+    let loadingMangas = false;
+    let selectedManga = null;
+    let mangaChapters = [];
+    let selectedChapter = null;
+    let chapterPages = [];
+    let loadingChapterPages = false;
+    let mangaSearchTerm = "";
+    let selectedMangaGenre = null;
+    
+    // === MANGA SOURCES ===
+    let mangaSources = [];  // Lista de fontes disponíveis
+    let selectedMangaSource = 'all';  // Fonte selecionada ('all', 'mangalivre.to', 'mangalivre.blog')
+    const mangaGenres = [
+        { id: 'acao', name: 'Ação', icon: '⚔️' },
+        { id: 'aventura', name: 'Aventura', icon: '🗺️' },
+        { id: 'comedia', name: 'Comédia', icon: '😂' },
+        { id: 'drama', name: 'Drama', icon: '🎭' },
+        { id: 'fantasia', name: 'Fantasia', icon: '✨' },
+        { id: 'romance', name: 'Romance', icon: '💕' },
+        { id: 'shounen', name: 'Shounen', icon: '💪' },
+        { id: 'seinen', name: 'Seinen', icon: '🎯' },
+        { id: 'isekai', name: 'Isekai', icon: '🌀' },
+        { id: 'slice-of-life', name: 'Slice of Life', icon: '🌸' },
+        { id: 'sobrenatural', name: 'Sobrenatural', icon: '👁️' },
+        { id: 'manhwa', name: 'Manhwa', icon: '🇰🇷' },
+    ];
+
     // Gêneros com termos de busca otimizados (animes populares de cada gênero)
     let selectedGenre = null;
     const animeGenres = [
@@ -549,6 +591,251 @@
     let showShareModal = false;
     let shareAnime = null;
     let shareMessage = '';
+
+    // === MANGA FUNCTIONS ===
+    
+    // Carrega as fontes de mangá disponíveis
+    async function loadMangaSources() {
+        try {
+            const sources = await GetMangaSourcesInfo();
+            mangaSources = sources || [];
+            console.log('[Manga] Fontes disponíveis:', mangaSources.map(s => s.name));
+        } catch (err) {
+            console.error('[Manga] Erro ao carregar fontes:', err);
+            mangaSources = [];
+        }
+    }
+    
+    // Altera a fonte de mangá selecionada
+    async function changeMangaSource(sourceId) {
+        selectedMangaSource = sourceId;
+        console.log('[Manga] Fonte alterada para:', sourceId);
+        
+        // Limpa dados anteriores
+        featuredMangas = [];
+        allMangas = [];
+        adultMangas = [];
+        
+        // Recarrega com a nova fonte
+        await loadMangaData();
+    }
+    
+    // Carrega mangás em destaque (apenas SFW por padrão)
+    async function loadMangaData() {
+        loadingMangas = true;
+        try {
+            // Carrega fontes se ainda não carregou
+            if (mangaSources.length === 0) {
+                await loadMangaSources();
+            }
+            
+            const sourceToUse = selectedMangaSource === 'all' ? '' : selectedMangaSource;
+            console.log('[Manga] Carregando mangás em destaque da fonte:', sourceToUse || 'todas');
+            
+            // Busca mangás em destaque (24 mangás populares SFW)
+            const featured = await GetFeaturedMangasFromSource(24, sourceToUse);
+            featuredMangas = featured || [];
+            
+            // Popular = os mesmos em destaque
+            popularMangas = featuredMangas.slice(0, 12);
+            
+            // Últimos = últimas atualizações
+            let latest;
+            if (sourceToUse) {
+                latest = await GetLatestMangasFromSource(sourceToUse);
+            } else {
+                latest = await GetLatestMangas();
+            }
+            latestMangas = (latest || []).slice(0, 12);
+            
+            // allMangas fica vazio até o usuário clicar em "Ver Todos"
+            allMangas = [];
+            
+            console.log('[Manga] Mangás em destaque carregados:', featuredMangas.length);
+        } catch (err) {
+            console.error('[Manga] Erro ao carregar:', err);
+            featuredMangas = [];
+            popularMangas = [];
+            latestMangas = [];
+        } finally {
+            loadingMangas = false;
+        }
+    }
+    
+    // Carrega TODOS os mangás (SFW) quando usuário clicar em "Ver Todos"
+    async function loadAllMangasSafe() {
+        loadingMangas = true;
+        try {
+            const sourceToUse = selectedMangaSource === 'all' ? '' : selectedMangaSource;
+            console.log('[Manga] Carregando todos os mangás (SFW) da fonte:', sourceToUse || 'todas (merge inteligente)');
+            
+            let result;
+            if (sourceToUse) {
+                result = await GetAllMangasFromSourceComplete(sourceToUse);
+                // Filtra adultos no frontend já que GetAllMangasFromSourceComplete não filtra
+                result = (result || []).filter(m => !isAdultMangaClient(m.genres));
+            } else {
+                // Usa merge inteligente: combina fontes escolhendo a versão com mais capítulos
+                console.log('[Manga] Usando merge inteligente de todas as fontes...');
+                result = await GetMergedMangasWithBestSource();
+                result = (result || []).filter(m => !isAdultMangaClient(m.genres));
+            }
+            allMangas = result || [];
+            console.log('[Manga] Total de mangás SFW:', allMangas.length);
+        } catch (err) {
+            console.error('[Manga] Erro ao carregar todos:', err);
+            allMangas = [];
+        } finally {
+            loadingMangas = false;
+        }
+    }
+    
+    // Helper para verificar se é conteúdo hentai no frontend
+    function isAdultMangaClient(genres) {
+        if (!genres || !Array.isArray(genres)) return false;
+        // Apenas hentai e conteúdo explícito
+        const adultGenres = ['hentai', '+18', 'r18', 'r-18'];
+        return genres.some(g => adultGenres.some(a => g.toLowerCase().includes(a)));
+    }
+    
+    // Carrega conteúdo adulto (+18)
+    async function loadAdultMangas() {
+        if (adultMangas.length > 0) return; // Já carregado
+        
+        loadingMangas = true;
+        try {
+            console.log('[Manga] Carregando mangás adultos (+18)...');
+            const result = await GetAllMangasAdult();
+            adultMangas = result || [];
+            console.log('[Manga] Total de mangás +18:', adultMangas.length);
+        } catch (err) {
+            console.error('[Manga] Erro ao carregar adultos:', err);
+            adultMangas = [];
+        } finally {
+            loadingMangas = false;
+        }
+    }
+    
+    // Toggle para exibir conteúdo adulto
+    async function toggleAdultContent() {
+        showAdultContent = !showAdultContent;
+        if (showAdultContent && adultMangas.length === 0) {
+            await loadAdultMangas();
+        }
+    }
+    
+    // Busca mangás
+    async function searchManga() {
+        if (!mangaSearchTerm.trim()) {
+            mangaSearchResults = [];
+            return;
+        }
+        
+        loadingMangas = true;
+        try {
+            mangaSearchResults = await SearchMangas(mangaSearchTerm) || [];
+            console.log('[Manga] Busca retornou:', mangaSearchResults.length, 'resultados');
+        } catch (err) {
+            console.error('[Manga] Erro na busca:', err);
+            mangaSearchResults = [];
+        } finally {
+            loadingMangas = false;
+        }
+    }
+    
+    // Seleciona um mangá para ver detalhes
+    async function selectManga(manga) {
+        selectedManga = manga;
+        mangaChapters = [];
+        loadingMangas = true;
+        
+        try {
+            // Carrega detalhes e capítulos
+            const [details, chapters] = await Promise.all([
+                GetMangaDetails(manga.url),
+                GetMangaChapters(manga.url)
+            ]);
+            
+            if (details) {
+                selectedManga = { ...manga, ...details };
+            }
+            mangaChapters = chapters || [];
+            console.log('[Manga] Capítulos carregados:', mangaChapters.length);
+        } catch (err) {
+            console.error('[Manga] Erro ao carregar detalhes:', err);
+        } finally {
+            loadingMangas = false;
+        }
+    }
+    
+    // Seleciona um capítulo para ler
+    async function selectChapter(chapter) {
+        selectedChapter = chapter;
+        chapterPages = [];
+        loadingChapterPages = true;
+        
+        try {
+            chapterPages = await GetChapterPages(chapter.url) || [];
+            console.log('[Manga] Páginas carregadas:', chapterPages.length);
+        } catch (err) {
+            console.error('[Manga] Erro ao carregar páginas:', err);
+            chapterPages = [];
+        } finally {
+            loadingChapterPages = false;
+        }
+    }
+    
+    // Volta do leitor de mangá
+    function closeMangaReader() {
+        selectedChapter = null;
+        chapterPages = [];
+    }
+    
+    // Volta dos detalhes do mangá
+    function closeMangaDetails() {
+        selectedManga = null;
+        mangaChapters = [];
+    }
+    
+    // Próximo capítulo
+    function nextChapter() {
+        if (!selectedChapter || mangaChapters.length === 0) return;
+        const currentIndex = mangaChapters.findIndex(c => c.url === selectedChapter.url);
+        if (currentIndex > 0) {
+            selectChapter(mangaChapters[currentIndex - 1]);
+        }
+    }
+    
+    // Capítulo anterior
+    function prevChapter() {
+        if (!selectedChapter || mangaChapters.length === 0) return;
+        const currentIndex = mangaChapters.findIndex(c => c.url === selectedChapter.url);
+        if (currentIndex < mangaChapters.length - 1) {
+            selectChapter(mangaChapters[currentIndex + 1]);
+        }
+    }
+    
+    // Busca mangás por gênero
+    async function loadMangasByGenre(genre) {
+        selectedMangaGenre = genre;
+        loadingMangas = true;
+        mangaSearchResults = [];
+        
+        try {
+            mangaSearchResults = await GetMangasByGenre(genre.name) || [];
+            console.log('[Manga] Gênero', genre.name, ':', mangaSearchResults.length, 'resultados');
+        } catch (err) {
+            console.error('[Manga] Erro ao buscar gênero:', err);
+        } finally {
+            loadingMangas = false;
+        }
+    }
+    
+    // Limpa filtro de gênero
+    function clearMangaGenre() {
+        selectedMangaGenre = null;
+        mangaSearchResults = [];
+    }
     
     function openShareModal(anime) {
         shareAnime = anime;
@@ -593,6 +880,9 @@
         activeTab = tab;
         if (tab === 'friends' && discordLinked) {
             loadFriendsActivity();
+        }
+        if (tab === 'manga' && allMangas.length === 0) {
+            loadMangaData();
         }
     }
 
@@ -1319,9 +1609,9 @@
             <header class="header {episodeSelectionScreen || currentView !== 'home' ? '' : 'minimal'}">
                 <div class="header-left">
                     <button type="button" class="btn-logo" onclick={() => { currentView = 'home'; episodeSelectionScreen = false; }}>
-                        <span class="logo-icon-small">🎬</span>
+                        <span class="logo-icon-small">{activeTab === 'manga' ? '📚' : '🎬'}</span>
                         <span class="logo-text-small">
-                            <span class="go">Go</span><span class="anime">Anime</span>
+                            <span class="go">Go</span><span class="anime">{activeTab === 'manga' ? 'Manga' : 'Anime'}</span>
                         </span>
                     </button>
                 </div>
@@ -1689,8 +1979,8 @@
                 {:else if currentView === 'home'}
                     <!-- HOME VIEW - NETFLIX/CRUNCHYROLL STYLE -->
                     <div class="home-view" class:ready={appReady}>
-                        <!-- FEATURED HERO with ROTATION -->
-                        {#if featuredAnime && featuredAnime.banner}
+                        <!-- FEATURED HERO with ROTATION (only for anime tab) -->
+                        {#if activeTab === 'anime' && featuredAnime && featuredAnime.banner}
                             {#key featuredAnime.id || featuredAnime.title}
                             <div 
                                 class="featured-hero" 
@@ -1755,7 +2045,7 @@
                                 </div>
                             </div>
                             {/key}
-                        {:else if carregando}
+                        {:else if activeTab === 'anime' && carregando}
                             <!-- Loading skeleton -->
                             <div class="featured-skeleton">
                                 <div class="skeleton-shimmer"></div>
@@ -1769,16 +2059,16 @@
                                 </div>
                                 <div class="hero-content-centered">
                                     <div class="hero-logo">
-                                        <span class="hero-emoji">🎬</span>
+                                        <span class="hero-emoji">{activeTab === 'manga' ? '📚' : '🎬'}</span>
                                         <h1 class="hero-brand">
-                                            <span class="brand-go">Go</span><span class="brand-anime">Anime</span>
+                                            <span class="brand-go">Go</span><span class="brand-anime">{activeTab === 'manga' ? 'Manga' : 'Anime'}</span>
                                         </h1>
                                     </div>
-                                    <p class="hero-tagline">Assista seus animes favoritos em HD</p>
+                                    <p class="hero-tagline">{activeTab === 'manga' ? 'Leia seus mangás favoritos online' : 'Assista seus animes favoritos em HD'}</p>
                                     <div class="hero-stats">
                                         <div class="stat">
-                                            <span class="stat-number">10K+</span>
-                                            <span class="stat-label">Animes</span>
+                                            <span class="stat-number">{activeTab === 'manga' ? '147+' : '10K+'}</span>
+                                            <span class="stat-label">{activeTab === 'manga' ? 'Mangás' : 'Animes'}</span>
                                         </div>
                                         <div class="stat-divider"></div>
                                         <div class="stat">
@@ -1815,7 +2105,6 @@
                                     >
                                         <span class="tab-icon">📚</span>
                                         <span class="tab-text">Mangás</span>
-                                        <span class="tab-badge soon">Em breve</span>
                                     </button>
                                     <button 
                                         type="button" 
@@ -2034,30 +2323,375 @@
                             
                             <!-- MANGA TAB -->
                             {:else if activeTab === 'manga'}
-                                <div class="tab-content manga-coming-soon">
-                                    <div class="coming-soon-card">
-                                        <div class="coming-soon-icon">📚</div>
-                                        <h2>Mangás em Breve!</h2>
-                                        <p>Estamos trabalhando para trazer seus mangás favoritos para você.</p>
-                                        <div class="coming-soon-features">
-                                            <div class="feature">
-                                                <span class="feature-icon">📖</span>
-                                                <span>Leitura Online</span>
+                                <!-- MANGA READER (fullscreen) -->
+                                {#if selectedChapter}
+                                    <div class="manga-reader-fullscreen">
+                                        <header class="reader-header">
+                                            <button class="btn-back" onclick={closeMangaReader}>
+                                                ← Voltar
+                                            </button>
+                                            <div class="chapter-info">
+                                                <span class="manga-name">{selectedManga?.title || 'Mangá'}</span>
+                                                <span class="chapter-number">Capítulo {selectedChapter.number || selectedChapter.title}</span>
                                             </div>
-                                            <div class="feature">
-                                                <span class="feature-icon">⬇️</span>
-                                                <span>Download Offline</span>
+                                            <div class="reader-nav">
+                                                <button class="btn-nav" onclick={prevChapter} title="Capítulo anterior">◀ Anterior</button>
+                                                <span class="page-count">{chapterPages.length} páginas</span>
+                                                <button class="btn-nav" onclick={nextChapter} title="Próximo capítulo">Próximo ▶</button>
                                             </div>
-                                            <div class="feature">
-                                                <span class="feature-icon">🔖</span>
-                                                <span>Marcadores</span>
+                                        </header>
+                                        
+                                        <div class="reader-content">
+                                            {#if loadingChapterPages}
+                                                <div class="loading-pages">
+                                                    <div class="spinner"></div>
+                                                    <p>Carregando páginas...</p>
+                                                </div>
+                                            {:else if chapterPages.length === 0}
+                                                <div class="no-pages">
+                                                    <p>Nenhuma página encontrada neste capítulo.</p>
+                                                    <button onclick={() => selectChapter(selectedChapter)}>Tentar novamente</button>
+                                                </div>
+                                            {:else}
+                                                <div class="pages-scroll">
+                                                    {#each chapterPages as page, i}
+                                                        <div class="page-wrapper">
+                                                            <img 
+                                                                src={page.url} 
+                                                                alt="Página {page.number || i + 1}"
+                                                                loading={i < 5 ? "eager" : "lazy"}
+                                                                decoding="async"
+                                                                fetchpriority={i < 3 ? "high" : "low"}
+                                                                class="manga-page"
+                                                                onload={(e) => { const img = /** @type {HTMLImageElement} */ (e.target); img.classList.add('loaded'); }}
+                                                                onerror={(e) => { const img = /** @type {HTMLImageElement} */ (e.target); img.classList.add('error'); }}
+                                                            />
+                                                            <div class="page-number">{i + 1} / {chapterPages.length}</div>
+                                                        </div>
+                                                    {/each}
+                                                    <div class="chapter-end">
+                                                        <p>Fim do capítulo</p>
+                                                        <button class="btn-next-chapter" onclick={nextChapter}>
+                                                            Próximo Capítulo ▶
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            {/if}
+                                        </div>
+                                    </div>
+                                
+                                <!-- MANGA DETAILS -->
+                                {:else if selectedManga}
+                                    <div class="manga-details-view">
+                                        <button class="btn-back-manga" onclick={closeMangaDetails}>
+                                            ← Voltar aos Mangás
+                                        </button>
+                                        
+                                        <!-- Hero Section with Background -->
+                                        <div class="manga-hero-wrapper">
+                                            <div class="manga-hero-bg" style="background-image: url('{selectedManga.image}')"></div>
+                                            <div class="manga-hero-content">
+                                                <div class="manga-cover-container">
+                                                    <img 
+                                                        src={selectedManga.image} 
+                                                        alt={selectedManga.title}
+                                                        class="manga-cover-large"
+                                                    />
+                                                    <div class="manga-cover-shadow"></div>
+                                                </div>
+                                                <div class="manga-info-details">
+                                                    <h1>{selectedManga.title}</h1>
+                                                    <div class="manga-meta-row">
+                                                        {#if selectedManga.status}
+                                                            <span class="manga-status-badge {selectedManga.status === 'Em Andamento' ? 'ongoing' : 'completed'}">
+                                                                {selectedManga.status === 'Em Andamento' ? '🔥' : '✅'} {selectedManga.status}
+                                                            </span>
+                                                        {/if}
+                                                        <span class="manga-chapters-count">📚 {mangaChapters.length} capítulos</span>
+                                                    </div>
+                                                    {#if selectedManga.author}
+                                                        <p class="manga-author">✍️ {selectedManga.author}</p>
+                                                    {/if}
+                                                    {#if selectedManga.genres?.length}
+                                                        <div class="manga-genres-list">
+                                                            {#each selectedManga.genres as genre}
+                                                                <span class="genre-tag">{genre}</span>
+                                                            {/each}
+                                                        </div>
+                                                    {/if}
+                                                    {#if selectedManga.description}
+                                                        <p class="manga-description">{selectedManga.description}</p>
+                                                    {/if}
+                                                    {#if mangaChapters.length > 0}
+                                                        <button class="btn-start-reading" onclick={() => selectChapter(mangaChapters[0])}>
+                                                            📖 Começar a Ler
+                                                        </button>
+                                                    {/if}
+                                                </div>
                                             </div>
                                         </div>
-                                        <button type="button" class="btn-notify" onclick={() => alert('Você será notificado quando disponível!')}>
-                                            🔔 Notifique-me
-                                        </button>
+                                        
+                                        <div class="chapters-section">
+                                            <h2>📖 Capítulos</h2>
+                                            {#if loadingMangas}
+                                                <div class="loading-chapters">
+                                                    <div class="spinner"></div>
+                                                    <p>Carregando capítulos...</p>
+                                                </div>
+                                            {:else if mangaChapters.length === 0}
+                                                <p class="no-chapters">Nenhum capítulo encontrado.</p>
+                                            {:else}
+                                                <div class="chapters-list">
+                                                    {#each mangaChapters as chapter}
+                                                        <button 
+                                                            class="chapter-item"
+                                                            onclick={() => selectChapter(chapter)}
+                                                        >
+                                                            <span class="chapter-num">Cap. {chapter.number || '?'}</span>
+                                                            <span class="chapter-title">{chapter.title}</span>
+                                                            {#if chapter.date}
+                                                                <span class="chapter-date">{chapter.date}</span>
+                                                            {/if}
+                                                        </button>
+                                                    {/each}
+                                                </div>
+                                            {/if}
+                                        </div>
                                     </div>
-                                </div>
+                                
+                                <!-- MANGA BROWSE -->
+                                {:else}
+                                    <div class="tab-content manga-tab">
+                                        <!-- Source Selector -->
+                                        <div class="manga-source-selector">
+                                            <span class="source-label">📡 Fonte:</span>
+                                            <div class="source-buttons">
+                                                <button 
+                                                    class="source-btn {selectedMangaSource === 'all' ? 'active' : ''}"
+                                                    onclick={() => changeMangaSource('all')}
+                                                >
+                                                    🌐 Todas
+                                                </button>
+                                                {#each mangaSources as source}
+                                                    <button 
+                                                        class="source-btn {selectedMangaSource === source.id ? 'active' : ''}"
+                                                        onclick={() => changeMangaSource(source.id)}
+                                                        title={source.description}
+                                                    >
+                                                        {source.name}
+                                                    </button>
+                                                {/each}
+                                            </div>
+                                        </div>
+                                        
+                                        <!-- Search Bar -->
+                                        <div class="manga-search-bar">
+                                            <input 
+                                                type="text" 
+                                                placeholder="🔍 Buscar mangás..."
+                                                bind:value={mangaSearchTerm}
+                                                onkeydown={(e) => e.key === 'Enter' && searchManga()}
+                                            />
+                                            <button onclick={searchManga}>Buscar</button>
+                                        </div>
+                                        
+                                        <!-- Genre Filter -->
+                                        <div class="manga-genres-filter">
+                                            {#each mangaGenres as genre}
+                                                <button 
+                                                    class="genre-btn {selectedMangaGenre?.id === genre.id ? 'active' : ''}"
+                                                    onclick={() => selectedMangaGenre?.id === genre.id ? clearMangaGenre() : loadMangasByGenre(genre)}
+                                                >
+                                                    {genre.icon} {genre.name}
+                                                </button>
+                                            {/each}
+                                        </div>
+                                        
+                                        {#if loadingMangas && featuredMangas.length === 0}
+                                            <!-- Skeleton Loading -->
+                                            <div class="manga-section">
+                                                <h2>🌟 Carregando...</h2>
+                                                <div class="skeleton-grid">
+                                                    {#each Array(12) as _, i}
+                                                        <div class="skeleton-card">
+                                                            <div class="skeleton-poster"></div>
+                                                            <div class="skeleton-title"></div>
+                                                            <div class="skeleton-subtitle"></div>
+                                                        </div>
+                                                    {/each}
+                                                </div>
+                                            </div>
+                                        {:else if mangaSearchResults.length > 0 || selectedMangaGenre}
+                                            <!-- Search/Genre Results -->
+                                            <div class="manga-section">
+                                                <h2>
+                                                    {#if selectedMangaGenre}
+                                                        {selectedMangaGenre.icon} {selectedMangaGenre.name}
+                                                    {:else}
+                                                        🔍 Resultados da Busca
+                                                    {/if}
+                                                </h2>
+                                                <div class="manga-grid">
+                                                    {#each mangaSearchResults as manga}
+                                                        <button class="manga-card" onclick={() => selectManga(manga)}>
+                                                            <div class="manga-poster">
+                                                                {#if manga.image}
+                                                                    <img src={manga.image} alt={manga.title} loading="lazy" />
+                                                                {:else}
+                                                                    <div class="no-image">📚</div>
+                                                                {/if}
+                                                                <div class="manga-overlay">
+                                                                    <span class="read-icon">📖</span>
+                                                                </div>
+                                                            </div>
+                                                            <div class="manga-card-info">
+                                                                <div class="manga-title">{manga.title}</div>
+                                                                {#if manga.latestChapter}
+                                                                    <div class="manga-latest">📖 {manga.latestChapter}</div>
+                                                                {/if}
+                                                            </div>
+                                                        </button>
+                                                    {/each}
+                                                </div>
+                                            </div>
+                                        {:else}
+                                            <!-- SEÇÃO EM DESTAQUE -->
+                                            {#if featuredMangas.length > 0}
+                                                <div class="manga-section featured-section">
+                                                    <h2>🌟 Em Destaque {#if selectedMangaSource !== 'all'}<span class="source-info">({selectedMangaSource})</span>{/if}</h2>
+                                                    <div class="manga-grid">
+                                                        {#each featuredMangas as manga}
+                                                            <button class="manga-card" onclick={() => selectManga(manga)}>
+                                                                <div class="manga-poster">
+                                                                    {#if manga.image}
+                                                                        <img src={manga.image} alt={manga.title} loading="lazy" />
+                                                                    {:else}
+                                                                        <div class="no-image">📚</div>
+                                                                    {/if}
+                                                                    <div class="manga-overlay">
+                                                                        <span class="read-icon">📖</span>
+                                                                    </div>
+                                                                    {#if manga.source && selectedMangaSource === 'all'}
+                                                                        <span class="source-badge">{manga.source === 'mangalivre.blog' ? '.blog' : '.to'}</span>
+                                                                    {/if}
+                                                                </div>
+                                                                <div class="manga-card-info">
+                                                                    <div class="manga-title">{manga.title}</div>
+                                                                    {#if manga.latestChapter}
+                                                                        <div class="manga-latest">📖 {manga.latestChapter}</div>
+                                                                    {/if}
+                                                                </div>
+                                                            </button>
+                                                        {/each}
+                                                    </div>
+                                                    
+                                                    <!-- Botão Ver Todos -->
+                                                    <div class="manga-section-footer">
+                                                        <button class="btn-view-all" onclick={loadAllMangasSafe}>
+                                                            📚 Ver Todos os Mangás
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            {/if}
+                                            
+                                            <!-- TODOS OS MANGÁS (quando carregados) -->
+                                            {#if allMangas.length > 0}
+                                                <div class="manga-section all-mangas-section">
+                                                    <h2>📚 Todos os Mangás ({allMangas.length} títulos)</h2>
+                                                    <div class="manga-grid">
+                                                        {#each allMangas as manga}
+                                                            <button class="manga-card" onclick={() => selectManga(manga)}>
+                                                                <div class="manga-poster">
+                                                                    {#if manga.image}
+                                                                        <img src={manga.image} alt={manga.title} loading="lazy" />
+                                                                    {:else}
+                                                                        <div class="no-image">📚</div>
+                                                                    {/if}
+                                                                    <div class="manga-overlay">
+                                                                        <span class="read-icon">📖</span>
+                                                                    </div>
+                                                                </div>
+                                                                <div class="manga-card-info">
+                                                                    <div class="manga-title">{manga.title}</div>
+                                                                    {#if manga.latestChapter}
+                                                                        <div class="manga-latest">📖 {manga.latestChapter}</div>
+                                                                    {/if}
+                                                                </div>
+                                                            </button>
+                                                        {/each}
+                                                    </div>
+                                                </div>
+                                            {/if}
+                                            
+                                            <!-- SEÇÃO +18 (Toggle) -->
+                                            <div class="manga-section adult-section">
+                                                <div class="adult-section-header">
+                                                    <h2>🔞 Conteúdo +18</h2>
+                                                    <button 
+                                                        class="btn-toggle-adult {showAdultContent ? 'active' : ''}"
+                                                        onclick={toggleAdultContent}
+                                                    >
+                                                        {showAdultContent ? '🔓 Esconder' : '🔒 Mostrar'}
+                                                    </button>
+                                                </div>
+                                                
+                                                {#if showAdultContent}
+                                                    {#if loadingMangas && adultMangas.length === 0}
+                                                        <div class="loading-mangas">
+                                                            <div class="spinner"></div>
+                                                            <p>Carregando conteúdo adulto...</p>
+                                                        </div>
+                                                    {:else if adultMangas.length > 0}
+                                                        <div class="adult-warning">
+                                                            ⚠️ Este conteúdo é destinado apenas para maiores de 18 anos.
+                                                        </div>
+                                                        <div class="manga-grid">
+                                                            {#each adultMangas as manga}
+                                                                <button class="manga-card adult-card" onclick={() => selectManga(manga)}>
+                                                                    <div class="manga-poster">
+                                                                        {#if manga.image}
+                                                                            <img src={manga.image} alt={manga.title} loading="lazy" />
+                                                                        {:else}
+                                                                            <div class="no-image">🔞</div>
+                                                                        {/if}
+                                                                        <div class="manga-overlay adult-overlay">
+                                                                            <span class="read-icon">📖</span>
+                                                                        </div>
+                                                                        <span class="adult-badge">+18</span>
+                                                                    </div>
+                                                                    <div class="manga-card-info">
+                                                                        <div class="manga-title">{manga.title}</div>
+                                                                        {#if manga.latestChapter}
+                                                                            <div class="manga-latest">📖 {manga.latestChapter}</div>
+                                                                        {/if}
+                                                                    </div>
+                                                                </button>
+                                                            {/each}
+                                                        </div>
+                                                    {:else}
+                                                        <p class="no-adult-content">Nenhum conteúdo adulto encontrado.</p>
+                                                    {/if}
+                                                {:else}
+                                                    <p class="adult-hidden-msg">
+                                                        Clique no botão acima para exibir conteúdo para maiores de 18 anos.
+                                                    </p>
+                                                {/if}
+                                            </div>
+                                            
+                                            <!-- Empty State -->
+                                            {#if featuredMangas.length === 0}
+                                                <div class="manga-empty-state">
+                                                    <div class="empty-icon">📚</div>
+                                                    <h3>Carregando todos os mangás...</h3>
+                                                    <p>Buscando todos os mangás do MangaLivre, isso pode levar alguns segundos.</p>
+                                                    <button class="btn-reload" onclick={loadMangaData}>
+                                                        🔄 Carregar Mangás
+                                                    </button>
+                                                </div>
+                                            {/if}
+                                        {/if}
+                                    </div>
+                                {/if}
                             
                             <!-- FRIENDS TAB (Discord Linking) -->
                             {:else if activeTab === 'friends'}
@@ -5367,11 +6001,6 @@
         font-weight: 600;
     }
     
-    .tab-badge.soon {
-        background: rgba(255, 193, 7, 0.2);
-        color: #ffc107;
-    }
-    
     .tab-badge.notify {
         background: #f5576c;
         color: #fff;
@@ -5387,79 +6016,1310 @@
        TAB CONTENT STYLES
        ============================================ */
     .tab-content {
-        padding: 30px 20px;
+        padding: 24px 16px;
         max-width: 1200px;
         margin: 0 auto;
     }
+
+    /* ============================================
+       MANGA TAB STYLES
+       ============================================ */
     
-    /* Manga Coming Soon */
-    .manga-coming-soon {
+    /* === MANGA SOURCE SELECTOR === */
+    .manga-source-selector {
         display: flex;
-        justify-content: center;
         align-items: center;
-        min-height: 400px;
+        gap: 12px;
+        margin-bottom: 16px;
+        padding: 12px 16px;
+        background: rgba(30, 33, 48, 0.6);
+        border-radius: 10px;
+        border: 1px solid rgba(102, 51, 153, 0.2);
+        backdrop-filter: blur(8px);
     }
     
-    .coming-soon-card {
-        text-align: center;
-        padding: 60px 40px;
-        background: rgba(20, 25, 50, 0.8);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 20px;
-        max-width: 500px;
-    }
-    
-    .coming-soon-icon {
-        font-size: 4rem;
-        margin-bottom: 20px;
-    }
-    
-    .coming-soon-card h2 {
-        margin: 0 0 10px;
+    .source-label {
+        font-weight: 600;
         color: #fff;
-        font-size: 1.8rem;
+        font-size: 0.85rem;
+        white-space: nowrap;
     }
     
-    .coming-soon-card p {
-        color: #888;
-        margin-bottom: 30px;
-    }
-    
-    .coming-soon-features {
+    .source-buttons {
         display: flex;
-        justify-content: center;
-        gap: 30px;
-        margin-bottom: 30px;
-    }
-    
-    .coming-soon-features .feature {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
         gap: 8px;
+        flex-wrap: wrap;
+    }
+    
+    .source-btn {
+        padding: 6px 14px;
+        background: rgba(102, 51, 153, 0.15);
+        border: 1px solid rgba(102, 51, 153, 0.3);
+        border-radius: 16px;
         color: #aaa;
-        font-size: 0.9rem;
+        font-size: 0.8rem;
+        cursor: pointer;
+        transition: all 0.2s ease;
     }
     
-    .coming-soon-features .feature-icon {
-        font-size: 1.5rem;
+    .source-btn:hover {
+        background: rgba(102, 51, 153, 0.35);
+        color: #fff;
     }
     
-    .btn-notify {
-        background: linear-gradient(135deg, #f5576c 0%, #f093fb 100%);
-        border: none;
-        padding: 12px 30px;
-        border-radius: 25px;
+    .source-btn.active {
+        background: linear-gradient(135deg, #663399, #9966cc);
+        color: white;
+        border-color: transparent;
+        font-weight: 600;
+        box-shadow: 0 3px 10px rgba(102, 51, 153, 0.35);
+    }
+    
+    /* Responsive source selector */
+    @media (max-width: 600px) {
+        .manga-source-selector {
+            flex-direction: column;
+            align-items: stretch;
+            gap: 10px;
+            padding: 10px;
+        }
+        
+        .source-label {
+            text-align: center;
+        }
+        
+        .source-buttons {
+            justify-content: center;
+        }
+        
+        .source-btn {
+            flex: 0 1 auto;
+            padding: 8px 12px;
+            font-size: 0.75rem;
+        }
+    }
+    
+    .manga-tab {
+        padding: 16px;
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+    
+    .manga-search-bar {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 16px;
+    }
+    
+    .manga-search-bar input {
+        flex: 1;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 12px;
+        padding: 14px 20px;
         color: #fff;
         font-size: 1rem;
-        font-weight: 500;
+        transition: all 0.3s;
+    }
+    
+    .manga-search-bar input:focus {
+        outline: none;
+        border-color: #663399;
+        background: rgba(255, 255, 255, 0.12);
+    }
+    
+    .manga-search-bar button {
+        background: linear-gradient(135deg, #663399, #8855bb);
+        border: none;
+        border-radius: 12px;
+        padding: 14px 28px;
+        color: #fff;
+        font-weight: 600;
         cursor: pointer;
         transition: all 0.25s;
     }
     
-    .btn-notify:hover {
+    .manga-search-bar button:hover {
         transform: translateY(-2px);
-        box-shadow: 0 5px 20px rgba(245, 87, 108, 0.4);
+        box-shadow: 0 5px 20px rgba(102, 51, 153, 0.4);
+    }
+    
+    .manga-genres-filter {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-bottom: 30px;
+    }
+    
+    .genre-btn {
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 20px;
+        padding: 8px 16px;
+        color: #ccc;
+        font-size: 0.85rem;
+        cursor: pointer;
+        transition: all 0.25s;
+    }
+    
+    .genre-btn:hover {
+        background: rgba(102, 51, 153, 0.3);
+        border-color: #663399;
+        color: #fff;
+    }
+    
+    .genre-btn.active {
+        background: linear-gradient(135deg, #663399, #8855bb);
+        border-color: transparent;
+        color: #fff;
+    }
+    
+    .manga-section {
+        margin-bottom: 32px;
+    }
+    
+    .manga-section h2 {
+        font-size: 1.3rem;
+        color: #fff;
+        margin-bottom: 16px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 600;
+    }
+    
+    /* === SKELETON LOADING === */
+    .skeleton-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+        gap: 16px;
+    }
+    
+    .skeleton-card {
+        animation: skeleton-pulse 1.5s ease-in-out infinite;
+    }
+    
+    .skeleton-poster {
+        aspect-ratio: 2/3;
+        background: linear-gradient(90deg, #1a1d2e 25%, #2a2d3e 50%, #1a1d2e 75%);
+        background-size: 200% 100%;
+        animation: skeleton-shimmer 1.5s ease-in-out infinite;
+        border-radius: 10px;
+    }
+    
+    .skeleton-title {
+        height: 14px;
+        background: linear-gradient(90deg, #1a1d2e 25%, #2a2d3e 50%, #1a1d2e 75%);
+        background-size: 200% 100%;
+        animation: skeleton-shimmer 1.5s ease-in-out infinite;
+        border-radius: 4px;
+        margin-top: 10px;
+        width: 80%;
+    }
+    
+    .skeleton-subtitle {
+        height: 10px;
+        background: linear-gradient(90deg, #1a1d2e 25%, #2a2d3e 50%, #1a1d2e 75%);
+        background-size: 200% 100%;
+        animation: skeleton-shimmer 1.5s ease-in-out infinite;
+        border-radius: 4px;
+        margin-top: 6px;
+        width: 50%;
+    }
+    
+    @keyframes skeleton-shimmer {
+        0% { background-position: 200% 0; }
+        100% { background-position: -200% 0; }
+    }
+    
+    @keyframes skeleton-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.7; }
+    }
+    
+    /* === LOADING SPINNER APRIMORADO === */
+    .loading-mangas {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 60px 20px;
+        gap: 16px;
+    }
+    
+    .loading-mangas .spinner {
+        width: 48px;
+        height: 48px;
+        border: 3px solid rgba(102, 51, 153, 0.2);
+        border-top-color: #9966cc;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+    }
+    
+    .loading-mangas p {
+        color: #888;
+        font-size: 0.9rem;
+    }
+    
+    @keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+
+    .manga-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+        gap: 16px;
+        will-change: transform;
+        contain: layout;
+    }
+    
+    /* Lazy loading skeleton para cards */
+    .manga-card {
+        background: transparent;
+        border: none;
+        cursor: pointer;
+        text-align: left;
+        transition: transform 0.2s ease;
+        will-change: transform;
+        contain: layout style;
+    }
+    
+    .manga-card:hover {
+        transform: translateY(-6px);
+    }
+    
+    .manga-card:active {
+        transform: translateY(-2px);
+    }
+    
+    .manga-poster {
+        position: relative;
+        aspect-ratio: 2/3;
+        border-radius: 10px;
+        overflow: hidden;
+        background: linear-gradient(135deg, #1a1d2e 0%, #242838 100%);
+        contain: strict;
+    }
+    
+    .manga-poster img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        transition: transform 0.3s ease;
+    }
+    
+    .manga-card:hover .manga-poster img {
+        transform: scale(1.05);
+    }
+    
+    .manga-poster .no-image {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 2.5rem;
+        background: linear-gradient(135deg, #1a1d2e, #2a2d3e);
+        color: rgba(255, 255, 255, 0.3);
+    }
+    
+    .manga-overlay {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(180deg, transparent 50%, rgba(102, 51, 153, 0.9) 100%);
+        display: flex;
+        align-items: flex-end;
+        justify-content: center;
+        padding-bottom: 15px;
+        opacity: 0;
+        transition: opacity 0.2s ease;
+    }
+    
+    .manga-card:hover .manga-overlay {
+        opacity: 1;
+    }
+    
+    .read-icon {
+        font-size: 2rem;
+        color: white;
+        text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    }
+    
+    .manga-card-info {
+        padding: 10px 2px 4px;
+    }
+    
+    .manga-card-info .manga-title {
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: #fff;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+        -webkit-box-orient: vertical;
+        line-height: 1.3;
+    }
+    
+    .manga-card-info .manga-latest {
+        font-size: 0.8rem;
+        color: #888;
+        margin-top: 4px;
+    }
+    
+    /* === SOURCE BADGE === */
+    .source-badge {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        background: linear-gradient(135deg, #663399, #9966cc);
+        color: white;
+        padding: 3px 6px;
+        border-radius: 4px;
+        font-size: 0.6rem;
+        font-weight: 700;
+        z-index: 5;
+        text-transform: uppercase;
+        backdrop-filter: blur(4px);
+    }
+    
+    .source-info {
+        font-size: 0.75rem;
+        font-weight: 400;
+        opacity: 0.6;
+        margin-left: 8px;
+    }
+    
+    /* === FEATURED SECTION === */
+    .featured-section {
+        background: linear-gradient(135deg, rgba(102, 51, 153, 0.08), rgba(30, 33, 48, 0.4));
+        padding: 20px;
+        border-radius: 14px;
+        border: 1px solid rgba(102, 51, 153, 0.25);
+        backdrop-filter: blur(8px);
+    }
+    
+    .featured-section h2 {
+        background: linear-gradient(90deg, #ffd700, #ff8c00);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
+    
+    .manga-section-footer {
+        display: flex;
+        justify-content: center;
+        margin-top: 20px;
+        padding-top: 20px;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    
+    .btn-view-all {
+        background: linear-gradient(135deg, #663399, #9966cc);
+        color: white;
+        border: none;
+        padding: 12px 32px;
+        border-radius: 25px;
+        font-size: 1rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.3s;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    
+    .btn-view-all:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 20px rgba(102, 51, 153, 0.4);
+    }
+    
+    /* === ALL MANGAS SECTION === */
+    .all-mangas-section {
+        margin-top: 32px;
+        padding: 24px;
+        background: rgba(30, 33, 48, 0.5);
+        border-radius: 16px;
+    }
+    
+    /* === ADULT SECTION (+18) === */
+    .adult-section {
+        margin-top: 40px;
+        padding: 24px;
+        background: rgba(139, 0, 0, 0.1);
+        border-radius: 16px;
+        border: 1px solid rgba(139, 0, 0, 0.3);
+    }
+    
+    .adult-section-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 16px;
+    }
+    
+    .adult-section-header h2 {
+        margin-bottom: 0;
+        color: #ff6666;
+    }
+    
+    .btn-toggle-adult {
+        background: rgba(139, 0, 0, 0.3);
+        color: #ff9999;
+        border: 1px solid rgba(139, 0, 0, 0.5);
+        padding: 8px 20px;
+        border-radius: 20px;
+        font-size: 0.9rem;
+        cursor: pointer;
+        transition: all 0.3s;
+    }
+    
+    .btn-toggle-adult:hover {
+        background: rgba(139, 0, 0, 0.5);
+    }
+    
+    .btn-toggle-adult.active {
+        background: rgba(139, 0, 0, 0.6);
+        color: white;
+    }
+    
+    .adult-warning {
+        background: rgba(255, 100, 100, 0.2);
+        color: #ff9999;
+        padding: 12px 16px;
+        border-radius: 8px;
+        text-align: center;
+        margin-bottom: 20px;
+        font-size: 0.9rem;
+    }
+    
+    .adult-card .manga-poster {
+        border: 2px solid rgba(139, 0, 0, 0.5);
+    }
+    
+    .adult-overlay {
+        background: rgba(139, 0, 0, 0.7) !important;
+    }
+    
+    .adult-badge {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        background: linear-gradient(135deg, #8b0000, #ff4444);
+        color: white;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 0.7rem;
+        font-weight: 700;
+        z-index: 5;
+    }
+    
+    .no-adult-content,
+    .adult-hidden-msg {
+        text-align: center;
+        color: #888;
+        font-size: 0.95rem;
+        padding: 20px;
+    }
+    
+    .loading-mangas {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 80px 20px;
+        color: #888;
+        gap: 20px;
+    }
+    
+    .manga-empty-state {
+        text-align: center;
+        padding: 80px 20px;
+    }
+    
+    .manga-empty-state .empty-icon {
+        font-size: 4rem;
+        margin-bottom: 20px;
+    }
+    
+    .manga-empty-state h3 {
+        color: #fff;
+        margin-bottom: 10px;
+    }
+    
+    .manga-empty-state p {
+        color: #666;
+        margin-bottom: 25px;
+    }
+    
+    .btn-reload {
+        background: linear-gradient(135deg, #663399, #8855bb);
+        border: none;
+        border-radius: 12px;
+        padding: 12px 28px;
+        color: #fff;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.25s;
+    }
+    
+    .btn-reload:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 20px rgba(102, 51, 153, 0.4);
+    }
+    
+    /* Manga Details View - Enhanced */
+    .manga-details-view {
+        padding: 0;
+        max-width: 100%;
+        margin: 0 auto;
+        min-height: 100vh;
+    }
+    
+    .btn-back-manga {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        z-index: 10;
+        background: rgba(0, 0, 0, 0.6);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 12px;
+        padding: 12px 24px;
+        color: #fff;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        font-weight: 500;
+    }
+    
+    .btn-back-manga:hover {
+        background: rgba(102, 51, 153, 0.6);
+        transform: translateX(-5px);
+    }
+    
+    /* Manga Hero Section with Background */
+    .manga-hero-wrapper {
+        position: relative;
+        min-height: 450px;
+        overflow: hidden;
+        border-radius: 0 0 30px 30px;
+        margin-bottom: 30px;
+    }
+    
+    .manga-hero-bg {
+        position: absolute;
+        inset: 0;
+        background-size: cover;
+        background-position: center top;
+        filter: blur(25px) brightness(0.4);
+        transform: scale(1.2);
+        z-index: 0;
+    }
+    
+    .manga-hero-bg::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(to bottom, 
+            rgba(15, 15, 25, 0.3) 0%,
+            rgba(15, 15, 25, 0.8) 60%,
+            rgba(15, 15, 25, 1) 100%);
+    }
+    
+    .manga-hero-content {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        gap: 40px;
+        padding: 80px 40px 40px;
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+    
+    .manga-cover-container {
+        position: relative;
+        flex-shrink: 0;
+    }
+    
+    .manga-cover-large {
+        width: 260px;
+        height: auto;
+        border-radius: 16px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.1);
+        object-fit: cover;
+        aspect-ratio: 2/3;
+        transition: transform 0.3s ease;
+    }
+    
+    .manga-cover-large:hover {
+        transform: scale(1.02);
+    }
+    
+    .manga-cover-shadow {
+        position: absolute;
+        bottom: -20px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 80%;
+        height: 30px;
+        background: radial-gradient(ellipse at center, rgba(102, 51, 153, 0.4) 0%, transparent 70%);
+        filter: blur(15px);
+    }
+    
+    .manga-info-details {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        padding-top: 20px;
+    }
+    
+    .manga-info-details h1 {
+        font-size: 2.4rem;
+        color: #fff;
+        margin: 0;
+        line-height: 1.2;
+        text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+    }
+    
+    .manga-meta-row {
+        display: flex;
+        align-items: center;
+        gap: 15px;
+        flex-wrap: wrap;
+    }
+    
+    .manga-status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 16px;
+        border-radius: 25px;
+        font-size: 0.9rem;
+        font-weight: 600;
+    }
+    
+    .manga-status-badge.ongoing {
+        background: linear-gradient(135deg, #ff6b35, #f7931e);
+        color: #fff;
+    }
+    
+    .manga-status-badge.completed {
+        background: linear-gradient(135deg, #10b981, #059669);
+        color: #fff;
+    }
+    
+    .manga-chapters-count {
+        color: #aaa;
+        font-size: 0.95rem;
+        background: rgba(255, 255, 255, 0.1);
+        padding: 8px 16px;
+        border-radius: 25px;
+    }
+    
+    .manga-author {
+        color: #888;
+        font-size: 1rem;
+        margin: 0;
+    }
+    
+    .manga-genres-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+    }
+    
+    .manga-genres-list .genre-tag {
+        background: rgba(102, 51, 153, 0.3);
+        border: 1px solid rgba(102, 51, 153, 0.5);
+        color: #d8b4fe;
+        padding: 6px 14px;
+        border-radius: 20px;
+        font-size: 0.85rem;
+        transition: all 0.2s;
+    }
+    
+    .manga-genres-list .genre-tag:hover {
+        background: rgba(102, 51, 153, 0.5);
+    }
+    
+    .manga-description {
+        color: #bbb;
+        font-size: 1rem;
+        line-height: 1.7;
+        max-width: 650px;
+        display: -webkit-box;
+        -webkit-line-clamp: 4;
+        line-clamp: 4;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+    }
+    
+    .btn-start-reading {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        background: linear-gradient(135deg, #663399, #8b5cf6);
+        border: none;
+        border-radius: 14px;
+        padding: 16px 32px;
+        color: #fff;
+        font-size: 1.1rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        width: fit-content;
+        margin-top: 10px;
+        box-shadow: 0 8px 25px rgba(102, 51, 153, 0.4);
+    }
+    
+    .btn-start-reading:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 12px 35px rgba(102, 51, 153, 0.5);
+    }
+    
+    .chapters-section {
+        padding: 0 40px 40px;
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+    
+    .chapters-section h2 {
+        color: #fff;
+        font-size: 1.5rem;
+        margin-bottom: 20px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    
+    .loading-chapters {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 40px;
+        color: #888;
+        gap: 15px;
+    }
+    
+    .no-chapters {
+        color: #666;
+        text-align: center;
+        padding: 40px;
+    }
+    
+    .chapters-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 12px;
+        max-height: 600px;
+        overflow-y: auto;
+        padding: 5px;
+    }
+    
+    .chapter-item {
+        display: flex;
+        align-items: center;
+        gap: 15px;
+        padding: 16px 20px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        cursor: pointer;
+        transition: all 0.25s;
+        text-align: left;
+        color: #fff;
+    }
+    
+    .chapter-item:hover {
+        background: rgba(102, 51, 153, 0.2);
+        border-color: rgba(102, 51, 153, 0.5);
+        transform: translateY(-2px);
+    }
+    
+    .chapter-num {
+        font-weight: 700;
+        color: #8b5cf6;
+        min-width: 70px;
+        font-size: 0.95rem;
+    }
+    
+    .chapter-title {
+        flex: 1;
+        color: #ddd;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 0.9rem;
+    }
+    
+    .chapter-date {
+        color: #666;
+        font-size: 0.8rem;
+    }
+    
+    /* Manga Reader Fullscreen */
+    .manga-reader-fullscreen {
+        position: fixed;
+        inset: 0;
+        background: #0a0a0f;
+        z-index: 1000;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+    
+    .reader-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 20px;
+        background: rgba(20, 20, 30, 0.95);
+        border-bottom: 1px solid #333;
+        gap: 20px;
+    }
+    
+    .reader-header .btn-back {
+        background: transparent;
+        border: 1px solid #555;
+        color: #fff;
+        padding: 8px 16px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        transition: all 0.2s;
+    }
+    
+    .reader-header .btn-back:hover {
+        background: #333;
+        border-color: #777;
+    }
+    
+    .reader-header .chapter-info {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+    }
+    
+    .reader-header .manga-name {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #fff;
+    }
+    
+    .reader-header .chapter-number {
+        font-size: 0.85rem;
+        color: #888;
+    }
+    
+    .reader-nav {
+        display: flex;
+        align-items: center;
+        gap: 15px;
+    }
+    
+    .reader-nav .btn-nav {
+        background: #663399;
+        border: none;
+        color: #fff;
+        padding: 8px 16px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 0.85rem;
+        transition: all 0.2s;
+    }
+    
+    .reader-nav .btn-nav:hover {
+        background: #7744aa;
+    }
+    
+    .reader-nav .page-count {
+        color: #888;
+        font-size: 0.85rem;
+    }
+    
+    .reader-content {
+        flex: 1;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+    }
+    
+    .loading-pages, .no-pages {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        color: #888;
+        gap: 20px;
+    }
+    
+    .no-pages button {
+        background: #663399;
+        border: none;
+        color: #fff;
+        padding: 10px 20px;
+        border-radius: 8px;
+        cursor: pointer;
+    }
+    
+    .pages-scroll {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 10px 0;
+        gap: 4px;
+        width: 100%;
+        max-width: 100%;
+        background: #000;
+    }
+    
+    .manga-page {
+        width: 100%;
+        max-width: 1200px;
+        height: auto;
+        display: block;
+        object-fit: contain;
+        background: #111;
+    }
+    
+    /* Telas grandes - imagens ocupam quase toda a largura */
+    @media (min-width: 1400px) {
+        .manga-page {
+            max-width: 1100px;
+        }
+        
+        .manga-grid,
+        .skeleton-grid {
+            grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+            gap: 20px;
+        }
+    }
+    
+    @media (min-width: 1200px) and (max-width: 1399px) {
+        .manga-page {
+            max-width: 1000px;
+        }
+        
+        .manga-grid,
+        .skeleton-grid {
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        }
+    }
+    
+    @media (min-width: 992px) and (max-width: 1199px) {
+        .manga-page {
+            max-width: 900px;
+        }
+        
+        .manga-grid,
+        .skeleton-grid {
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+        }
+    }
+    
+    @media (min-width: 768px) and (max-width: 991px) {
+        .manga-grid,
+        .skeleton-grid {
+            grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+            gap: 14px;
+        }
+        
+        .manga-page {
+            max-width: 750px;
+        }
+        
+        .manga-card-info .manga-title {
+            font-size: 0.8rem;
+        }
+    }
+    
+    @media (max-width: 767px) {
+        .manga-grid,
+        .skeleton-grid {
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+        }
+        
+        .manga-section h2 {
+            font-size: 1.1rem;
+        }
+        
+        .manga-card-info .manga-title {
+            font-size: 0.75rem;
+        }
+        
+        .manga-card-info .manga-latest {
+            font-size: 0.7rem;
+        }
+        
+        .source-badge {
+            font-size: 0.55rem;
+            padding: 2px 5px;
+        }
+    }
+    
+    @media (max-width: 480px) {
+        .manga-grid,
+        .skeleton-grid {
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+        
+        .manga-tab {
+            padding: 12px;
+        }
+        
+        .manga-section {
+            margin-bottom: 24px;
+        }
+        
+        .featured-section {
+            padding: 16px;
+        }
+    }
+
+    /* Page wrapper e loading states */
+    .page-wrapper {
+        position: relative;
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        min-height: 200px;
+        background: #111;
+    }
+    
+    .page-wrapper .manga-page {
+        opacity: 0;
+        transition: opacity 0.3s ease;
+    }
+    
+    .page-wrapper :global(.manga-page.loaded) {
+        opacity: 1;
+    }
+    
+    .page-wrapper :global(.manga-page.error) {
+        opacity: 0.3;
+        min-height: 400px;
+        background: #222 url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23666"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>') center no-repeat;
+        background-size: 60px;
+    }
+    
+    .page-number {
+        position: absolute;
+        bottom: 10px;
+        right: 10px;
+        background: rgba(0, 0, 0, 0.7);
+        color: #fff;
+        padding: 4px 10px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        opacity: 0;
+        transition: opacity 0.2s;
+    }
+    
+    .page-wrapper:hover .page-number {
+        opacity: 1;
+    }
+    
+    .chapter-end {
+        padding: 40px 20px;
+        text-align: center;
+        background: linear-gradient(to bottom, #000, #111);
+    }
+    
+    .chapter-end p {
+        color: #888;
+        margin-bottom: 20px;
+        font-size: 1.1rem;
+    }
+    
+    .btn-next-chapter {
+        background: #663399;
+        border: none;
+        color: #fff;
+        padding: 14px 32px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 1.1rem;
+        transition: all 0.2s;
+    }
+    
+    .btn-next-chapter:hover {
+        background: #7744aa;
+        transform: scale(1.05);
+    }
+
+    /* Manga Responsive Styles */
+    @media (max-width: 1024px) {
+        .manga-hero-content {
+            padding: 70px 30px 30px;
+            gap: 30px;
+        }
+        
+        .manga-cover-large {
+            width: 200px;
+        }
+        
+        .manga-info-details h1 {
+            font-size: 2rem;
+        }
+        
+        .chapters-section {
+            padding: 0 30px 30px;
+        }
+        
+        .chapters-list {
+            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        }
+    }
+
+    @media (max-width: 768px) {
+        .manga-hero-wrapper {
+            min-height: auto;
+            border-radius: 0 0 20px 20px;
+        }
+        
+        .manga-hero-content {
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            padding: 80px 20px 30px;
+            gap: 25px;
+        }
+        
+        .manga-cover-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        
+        .manga-cover-large {
+            width: 180px;
+        }
+        
+        .manga-info-details {
+            align-items: center;
+            padding-top: 0;
+        }
+        
+        .manga-info-details h1 {
+            font-size: 1.6rem;
+        }
+        
+        .manga-meta-row {
+            justify-content: center;
+        }
+        
+        .manga-genres-list {
+            justify-content: center;
+        }
+        
+        .manga-description {
+            text-align: center;
+            -webkit-line-clamp: 3;
+            line-clamp: 3;
+        }
+        
+        .btn-start-reading {
+            width: 100%;
+            justify-content: center;
+        }
+        
+        .chapters-section {
+            padding: 0 15px 30px;
+        }
+        
+        .chapters-section h2 {
+            font-size: 1.3rem;
+        }
+        
+        .chapters-list {
+            grid-template-columns: 1fr;
+            max-height: none;
+        }
+        
+        .chapter-item {
+            padding: 14px 16px;
+        }
+        
+        .reader-header {
+            flex-wrap: wrap;
+            gap: 10px;
+            padding: 10px 15px;
+        }
+        
+        .chapter-info {
+            order: -1;
+            width: 100%;
+            text-align: center;
+            padding-bottom: 8px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .reader-nav {
+            width: 100%;
+            justify-content: center;
+        }
+        
+        .btn-nav {
+            padding: 8px 12px;
+            font-size: 0.85rem;
+        }
+        
+        .btn-back-manga {
+            padding: 10px 18px;
+            font-size: 0.9rem;
+        }
+    }
+    
+    @media (max-width: 480px) {
+        .manga-cover-large {
+            width: 150px;
+        }
+        
+        .manga-info-details h1 {
+            font-size: 1.4rem;
+        }
+        
+        .manga-status-badge,
+        .manga-chapters-count {
+            font-size: 0.8rem;
+            padding: 6px 12px;
+        }
+        
+        .manga-genres-list .genre-tag {
+            font-size: 0.75rem;
+            padding: 4px 10px;
+        }
+        
+        .manga-description {
+            font-size: 0.9rem;
+        }
+        
+        .btn-start-reading {
+            padding: 14px 24px;
+            font-size: 1rem;
+        }
+        
+        .chapter-item {
+            padding: 12px 14px;
+            gap: 10px;
+        }
+        
+        .chapter-num {
+            min-width: 60px;
+            font-size: 0.85rem;
+        }
+        
+        .chapter-title {
+            font-size: 0.85rem;
+        }
     }
 
     /* ============================================

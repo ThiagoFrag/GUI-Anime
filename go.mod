@@ -3,12 +3,12 @@ module GoAnimeGUI
 go 1.25
 
 require (
+	github.com/PuerkitoBio/goquery v1.11.0
 	github.com/alvarorichard/Goanime v1.1.1-0.20251205203834-f0e053886006
 	github.com/wailsapp/wails/v2 v2.11.0
 )
 
 require (
-	github.com/PuerkitoBio/goquery v1.11.0 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect

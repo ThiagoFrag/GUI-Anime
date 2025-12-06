@@ -9,7 +9,18 @@
     export let onClose = () => {};
     export let onNext = () => {};
     export let onPrevious = () => {};
-    export let skipTimes = null;
+    /**
+     * skipTimes: informações de abertura/ending para pular
+     * {
+     *   hasOpening: boolean,
+     *   openingStart: number,
+     *   openingEnd: number,
+     *   hasEnding: boolean,
+     *   endingStart: number,
+     *   endingEnd: number
+     * }
+     */
+    export let skipTimes = /** @type {{hasOpening?:boolean,openingStart?:number,openingEnd?:number,hasEnding?:boolean,endingStart?:number,endingEnd?:number}|null} */ (null);
     
     // Elements
     let videoEl;
@@ -483,7 +494,7 @@
     <!-- Top Gradient & Header -->
     <div class="top-overlay" class:visible={showControls || !isPlaying}>
         <div class="header-content">
-            <button type="button" class="btn-back" onclick={onClose}>
+            <button type="button" class="btn-back" onclick={onClose} aria-label="Voltar">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M19 12H5M12 19l-7-7 7-7"/>
                 </svg>
@@ -525,13 +536,13 @@
                 <div class="error-icon">⚠️</div>
                 <p class="error-message">{error}</p>
                 <div class="error-actions">
-                    <button onclick={() => { error = null; isLoading = true; initPlayer(); }}>
+                    <button onclick={() => { error = null; isLoading = true; initPlayer(); }} aria-label="Tentar novamente">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                         </svg>
                         Tentar novamente
                     </button>
-                    <button onclick={onClose}>
+                    <button onclick={onClose} aria-label="Voltar">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M19 12H5M12 19l-7-7 7-7"/>
                         </svg>
@@ -545,7 +556,7 @@
     <!-- Paused Overlay -->
     {#if !isPlaying && !isLoading && !error}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="paused-overlay" onclick={togglePlay}>
+        <div class="paused-overlay" tabindex="0" role="button" aria-label="Play/Pause" onclick={togglePlay} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') togglePlay(); }}>
             <div class="big-play-btn">
                 <svg viewBox="0 0 24 24" fill="currentColor">
                     <path d="M8 5v14l11-7z"/>
@@ -556,7 +567,7 @@
     
     <!-- Skip Button -->
     {#if showSkipButton && currentSkipType}
-        <button type="button" class="skip-btn" onclick={doSkip}>
+        <button type="button" class="skip-btn" onclick={doSkip} aria-label="Pular abertura/ending">
             <span class="skip-content">
                 <svg viewBox="0 0 24 24" fill="currentColor" class="skip-icon">
                     <path d="M5 4l10 8-10 8V4zM19 4v16h-2V4h2z"/>
@@ -594,6 +605,10 @@
                 class="progress-bar"
                 bind:this={progressBarEl}
                 onclick={seek}
+                tabindex="0"
+                role="slider"
+                aria-label="Barra de progresso"
+                onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') seek(e); }}
                 onmousemove={handleProgressHover}
                 onmouseleave={handleProgressLeave}
             >
@@ -672,7 +687,7 @@
                         {/if}
                     </button>
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
-                    <div class="volume-slider" onclick={setVolume}>
+                    <div class="volume-slider" onclick={setVolume} tabindex="0" role="slider" aria-label="Controle de volume" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') setVolume(e); }}>
                         <div class="volume-track">
                             <div class="volume-fill" style="width: {isMuted ? 0 : volume * 100}%"></div>
                         </div>

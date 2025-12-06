@@ -298,6 +298,122 @@ export namespace main {
 	        this.genre = source["genre"];
 	    }
 	}
+	export class MangaChapterInfo {
+	    number: string;
+	    title: string;
+	    url: string;
+	    date: string;
+	    mangaId: string;
+	    mangaName: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MangaChapterInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.number = source["number"];
+	        this.title = source["title"];
+	        this.url = source["url"];
+	        this.date = source["date"];
+	        this.mangaId = source["mangaId"];
+	        this.mangaName = source["mangaName"];
+	    }
+	}
+	export class MangaInfo {
+	    id: string;
+	    title: string;
+	    image: string;
+	    url: string;
+	    latestChapter: string;
+	    genres: string[];
+	    description: string;
+	    status: string;
+	    source: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MangaInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.title = source["title"];
+	        this.image = source["image"];
+	        this.url = source["url"];
+	        this.latestChapter = source["latestChapter"];
+	        this.genres = source["genres"];
+	        this.description = source["description"];
+	        this.status = source["status"];
+	        this.source = source["source"];
+	    }
+	}
+	export class MangaListResult {
+	    mangas: MangaInfo[];
+	    totalPages: number;
+	    page: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new MangaListResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.mangas = this.convertValues(source["mangas"], MangaInfo);
+	        this.totalPages = source["totalPages"];
+	        this.page = source["page"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class MangaPageInfo {
+	    number: number;
+	    url: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MangaPageInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.number = source["number"];
+	        this.url = source["url"];
+	    }
+	}
+	export class MangaSourceInfo {
+	    id: string;
+	    name: string;
+	    description: string;
+	    url: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MangaSourceInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.description = source["description"];
+	        this.url = source["url"];
+	    }
+	}
 	export class SkipTimesResult {
 	    hasOpening: boolean;
 	    openingStart: number;

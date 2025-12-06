@@ -4,5 +4,6 @@
  */
 
 export * as animeService from './anime.js';
+export * as mangaService from './manga.js';
 export * as userService from './user.js';
 export * as discordService from './discord.js';

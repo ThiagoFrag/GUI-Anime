@@ -32,6 +32,16 @@ export function ExportUserData():Promise<string>;
 
 export function GenerateDiscordLinkCode():Promise<string>;
 
+export function GetAllMangas(arg1:number):Promise<main.MangaListResult>;
+
+export function GetAllMangasAdult():Promise<Array<main.MangaInfo>>;
+
+export function GetAllMangasComplete():Promise<Array<main.MangaInfo>>;
+
+export function GetAllMangasFromSourceComplete(arg1:string):Promise<Array<main.MangaInfo>>;
+
+export function GetAllMangasSafe():Promise<Array<main.MangaInfo>>;
+
 export function GetAlternativeSource(arg1:Array<string>):Promise<string>;
 
 export function GetAnimeHDImage(arg1:string):Promise<Record<string, string>>;
@@ -39,6 +49,10 @@ export function GetAnimeHDImage(arg1:string):Promise<Record<string, string>>;
 export function GetAnimeURL(arg1:string):Promise<string>;
 
 export function GetCacheStats():Promise<main.CacheStats>;
+
+export function GetChapterPages(arg1:string):Promise<Array<main.MangaPageInfo>>;
+
+export function GetChapterPagesAuto(arg1:string):Promise<Array<main.MangaPageInfo>>;
 
 export function GetConsumetEpisodes(arg1:string,arg2:string):Promise<Array<main.ConsumetEpisode>>;
 
@@ -70,7 +84,51 @@ export function GetEpisodesForSource(arg1:string,arg2:string):Promise<Array<stor
 
 export function GetFavorites():Promise<Array<store.SavedAnime>>;
 
+export function GetFeaturedMangas(arg1:number):Promise<Array<main.MangaInfo>>;
+
+export function GetFeaturedMangasFromSource(arg1:number,arg2:string):Promise<Array<main.MangaInfo>>;
+
+export function GetLatestMangas():Promise<Array<main.MangaInfo>>;
+
+export function GetLatestMangasFromSource(arg1:string):Promise<Array<main.MangaInfo>>;
+
+export function GetMangaChapters(arg1:string):Promise<Array<main.MangaChapterInfo>>;
+
+export function GetMangaChaptersAuto(arg1:string):Promise<Array<main.MangaChapterInfo>>;
+
+export function GetMangaDetails(arg1:string):Promise<main.MangaInfo>;
+
+export function GetMangaDetailsAuto(arg1:string):Promise<main.MangaInfo>;
+
+export function GetMangaGenres():Promise<Array<string>>;
+
+export function GetMangaSources():Promise<Array<string>>;
+
+export function GetMangaSourcesInfo():Promise<Array<main.MangaSourceInfo>>;
+
+export function GetMangasByGenre(arg1:string):Promise<Array<main.MangaInfo>>;
+
+export function GetMangasFromAllSources(arg1:number):Promise<main.MangaListResult>;
+
+export function GetMangasFromSource(arg1:string,arg2:number):Promise<main.MangaListResult>;
+
+export function GetMergedMangas(arg1:number):Promise<Array<main.MangaInfo>>;
+
+export function GetMergedMangasComplete():Promise<Array<main.MangaInfo>>;
+
+export function GetMergedMangasWithBestSource():Promise<Array<main.MangaInfo>>;
+
 export function GetPopularAnimes(arg1:number):Promise<Array<main.AniListAnime>>;
+
+export function GetPopularMangas():Promise<Array<main.MangaInfo>>;
+
+export function GetPopularMangasAdult():Promise<Array<main.MangaInfo>>;
+
+export function GetPopularMangasAllSources():Promise<Array<main.MangaInfo>>;
+
+export function GetPopularMangasFromSource(arg1:string):Promise<Array<main.MangaInfo>>;
+
+export function GetPopularMangasSafe():Promise<Array<main.MangaInfo>>;
 
 export function GetProxyURLForVideo(arg1:string):Promise<string>;
 
@@ -129,6 +187,12 @@ export function SearchAniList(arg1:string,arg2:number):Promise<Array<main.AniLis
 export function SearchConsumet(arg1:string):Promise<Array<main.ConsumetAnime>>;
 
 export function SearchEnime(arg1:string):Promise<Array<main.EnimeAnime>>;
+
+export function SearchMangas(arg1:string):Promise<Array<main.MangaInfo>>;
+
+export function SearchMangasAllSources(arg1:string):Promise<Array<main.MangaInfo>>;
+
+export function SearchMangasFromSource(arg1:string,arg2:string):Promise<Array<main.MangaInfo>>;
 
 export function SendDiscordRecommendation(arg1:string,arg2:string,arg3:number,arg4:string):Promise<void>;
 

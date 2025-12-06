@@ -58,6 +58,26 @@ export function GenerateDiscordLinkCode() {
   return window['go']['main']['App']['GenerateDiscordLinkCode']();
 }
 
+export function GetAllMangas(arg1) {
+  return window['go']['main']['App']['GetAllMangas'](arg1);
+}
+
+export function GetAllMangasAdult() {
+  return window['go']['main']['App']['GetAllMangasAdult']();
+}
+
+export function GetAllMangasComplete() {
+  return window['go']['main']['App']['GetAllMangasComplete']();
+}
+
+export function GetAllMangasFromSourceComplete(arg1) {
+  return window['go']['main']['App']['GetAllMangasFromSourceComplete'](arg1);
+}
+
+export function GetAllMangasSafe() {
+  return window['go']['main']['App']['GetAllMangasSafe']();
+}
+
 export function GetAlternativeSource(arg1) {
   return window['go']['main']['App']['GetAlternativeSource'](arg1);
 }
@@ -72,6 +92,14 @@ export function GetAnimeURL(arg1) {
 
 export function GetCacheStats() {
   return window['go']['main']['App']['GetCacheStats']();
+}
+
+export function GetChapterPages(arg1) {
+  return window['go']['main']['App']['GetChapterPages'](arg1);
+}
+
+export function GetChapterPagesAuto(arg1) {
+  return window['go']['main']['App']['GetChapterPagesAuto'](arg1);
 }
 
 export function GetConsumetEpisodes(arg1, arg2) {
@@ -134,8 +162,96 @@ export function GetFavorites() {
   return window['go']['main']['App']['GetFavorites']();
 }
 
+export function GetFeaturedMangas(arg1) {
+  return window['go']['main']['App']['GetFeaturedMangas'](arg1);
+}
+
+export function GetFeaturedMangasFromSource(arg1, arg2) {
+  return window['go']['main']['App']['GetFeaturedMangasFromSource'](arg1, arg2);
+}
+
+export function GetLatestMangas() {
+  return window['go']['main']['App']['GetLatestMangas']();
+}
+
+export function GetLatestMangasFromSource(arg1) {
+  return window['go']['main']['App']['GetLatestMangasFromSource'](arg1);
+}
+
+export function GetMangaChapters(arg1) {
+  return window['go']['main']['App']['GetMangaChapters'](arg1);
+}
+
+export function GetMangaChaptersAuto(arg1) {
+  return window['go']['main']['App']['GetMangaChaptersAuto'](arg1);
+}
+
+export function GetMangaDetails(arg1) {
+  return window['go']['main']['App']['GetMangaDetails'](arg1);
+}
+
+export function GetMangaDetailsAuto(arg1) {
+  return window['go']['main']['App']['GetMangaDetailsAuto'](arg1);
+}
+
+export function GetMangaGenres() {
+  return window['go']['main']['App']['GetMangaGenres']();
+}
+
+export function GetMangaSources() {
+  return window['go']['main']['App']['GetMangaSources']();
+}
+
+export function GetMangaSourcesInfo() {
+  return window['go']['main']['App']['GetMangaSourcesInfo']();
+}
+
+export function GetMangasByGenre(arg1) {
+  return window['go']['main']['App']['GetMangasByGenre'](arg1);
+}
+
+export function GetMangasFromAllSources(arg1) {
+  return window['go']['main']['App']['GetMangasFromAllSources'](arg1);
+}
+
+export function GetMangasFromSource(arg1, arg2) {
+  return window['go']['main']['App']['GetMangasFromSource'](arg1, arg2);
+}
+
+export function GetMergedMangas(arg1) {
+  return window['go']['main']['App']['GetMergedMangas'](arg1);
+}
+
+export function GetMergedMangasComplete() {
+  return window['go']['main']['App']['GetMergedMangasComplete']();
+}
+
+export function GetMergedMangasWithBestSource() {
+  return window['go']['main']['App']['GetMergedMangasWithBestSource']();
+}
+
 export function GetPopularAnimes(arg1) {
   return window['go']['main']['App']['GetPopularAnimes'](arg1);
+}
+
+export function GetPopularMangas() {
+  return window['go']['main']['App']['GetPopularMangas']();
+}
+
+export function GetPopularMangasAdult() {
+  return window['go']['main']['App']['GetPopularMangasAdult']();
+}
+
+export function GetPopularMangasAllSources() {
+  return window['go']['main']['App']['GetPopularMangasAllSources']();
+}
+
+export function GetPopularMangasFromSource(arg1) {
+  return window['go']['main']['App']['GetPopularMangasFromSource'](arg1);
+}
+
+export function GetPopularMangasSafe() {
+  return window['go']['main']['App']['GetPopularMangasSafe']();
 }
 
 export function GetProxyURLForVideo(arg1) {
@@ -252,6 +368,18 @@ export function SearchConsumet(arg1) {
 
 export function SearchEnime(arg1) {
   return window['go']['main']['App']['SearchEnime'](arg1);
+}
+
+export function SearchMangas(arg1) {
+  return window['go']['main']['App']['SearchMangas'](arg1);
+}
+
+export function SearchMangasAllSources(arg1) {
+  return window['go']['main']['App']['SearchMangasAllSources'](arg1);
+}
+
+export function SearchMangasFromSource(arg1, arg2) {
+  return window['go']['main']['App']['SearchMangasFromSource'](arg1, arg2);
 }
 
 export function SendDiscordRecommendation(arg1, arg2, arg3, arg4) {

@@ -18,6 +18,12 @@ export { default as AnimeGrid } from './anime/AnimeGrid.svelte';
 export { default as GenreFilter } from './anime/GenreFilter.svelte';
 export { default as FeaturedHero } from './anime/FeaturedHero.svelte';
 
+// Manga
+export { default as MangaCard } from './manga/MangaCard.svelte';
+export { default as MangaGrid } from './manga/MangaGrid.svelte';
+export { default as MangaReader } from './manga/MangaReader.svelte';
+export { default as MangaDetails } from './manga/MangaDetails.svelte';
+
 // Views
 export { default as LoginScreen } from './views/LoginScreen.svelte';
 

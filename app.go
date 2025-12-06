@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"GoAnimeGUI/internal/manga"
 	"GoAnimeGUI/pkg/anilist"
 	"GoAnimeGUI/pkg/aniskip"
 	"GoAnimeGUI/pkg/consumet"
@@ -143,12 +144,23 @@ type App struct {
 	currentVideoURL string
 	proxyMutex      sync.RWMutex
 
+	// Cache de imagens de mangá para carregamento rápido
+	imageCache      map[string][]byte
+	imageCacheMutex sync.RWMutex
+	imageClient     *http.Client
+
 	// Estado de inicialização
 	initialized bool
 	initMutex   sync.RWMutex
 
 	// HTTP client para validação de URLs
 	validationClient *http.Client
+
+	// Cliente de Manga com cache e worker pool
+	mangaClient     *manga.MangaClient
+	mangaCache      *manga.MangaCache
+	mangaWorkerPool *manga.WorkerPool
+	mangaAggregator *manga.MangaAggregator // Agregador de múltiplas fontes
 }
 
 // Cache TTLs
@@ -168,6 +180,16 @@ func NewApp() *App {
 		hdImageCache:   make(map[string]*anilist.AnimeMedia),
 		streamCache:    make(map[string]*StreamCacheEntry),
 		sourceFailures: make(map[string]*SourceFailure),
+		imageCache:     make(map[string][]byte),
+		imageClient: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        50,
+				MaxIdleConnsPerHost: 20,
+				IdleConnTimeout:     90 * time.Second,
+				DisableCompression:  false,
+			},
+		},
 		validationClient: &http.Client{
 			Timeout: 3 * time.Second, // Reduzido para resposta mais rápida
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -210,6 +232,12 @@ func NewApp() *App {
 			return url, err
 		},
 	})
+
+	// Inicializa o cliente de Manga com cache e worker pool
+	app.mangaClient = manga.NewMangaClient()
+	app.mangaCache = manga.NewMangaCache()
+	app.mangaWorkerPool = manga.NewWorkerPool(app.mangaClient, app.mangaCache, 4) // 4 workers paralelos
+	app.mangaAggregator = manga.NewMangaAggregator()                              // Agregador com todas as fontes
 
 	return app
 }
@@ -606,7 +634,8 @@ func (a *App) startVideoProxy() error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/video", a.handleVideoProxy)
-	mux.HandleFunc("/proxy/", a.handleGenericProxy) // Para segmentos HLS
+	mux.HandleFunc("/proxy/", a.handleGenericProxy)         // Para segmentos HLS
+	mux.HandleFunc("/manga-image", a.handleMangaImageProxy) // Para imagens de mangá com cache
 
 	a.proxyServer = &http.Server{
 		Addr:    fmt.Sprintf("127.0.0.1:%d", a.proxyPort),
@@ -675,6 +704,102 @@ func (a *App) handleGenericProxy(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+// handleMangaImageProxy faz proxy de imagens de mangá com cache em memória
+func (a *App) handleMangaImageProxy(w http.ResponseWriter, r *http.Request) {
+	imageURL := r.URL.Query().Get("url")
+	referer := r.URL.Query().Get("referer")
+
+	if imageURL == "" {
+		http.Error(w, "URL não especificada", http.StatusBadRequest)
+		return
+	}
+
+	// Verifica cache
+	a.imageCacheMutex.RLock()
+	cachedData, exists := a.imageCache[imageURL]
+	a.imageCacheMutex.RUnlock()
+
+	if exists && len(cachedData) > 0 {
+		// Serve do cache
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Write(cachedData)
+		return
+	}
+
+	// Baixa a imagem
+	req, err := http.NewRequest("GET", imageURL, nil)
+	if err != nil {
+		http.Error(w, "Erro ao criar request", http.StatusInternalServerError)
+		return
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7")
+
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+	} else {
+		// Extrai referer da URL
+		parsed, _ := url.Parse(imageURL)
+		if parsed != nil {
+			req.Header.Set("Referer", fmt.Sprintf("%s://%s/", parsed.Scheme, parsed.Host))
+		}
+	}
+
+	resp, err := a.imageClient.Do(req)
+	if err != nil {
+		fmt.Printf("[MangaImageProxy] Erro ao baixar: %v\n", err)
+		http.Error(w, "Erro ao baixar imagem", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		http.Error(w, "Imagem não encontrada", resp.StatusCode)
+		return
+	}
+
+	// Lê a imagem
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, "Erro ao ler imagem", http.StatusInternalServerError)
+		return
+	}
+
+	// Salva no cache (limite de 100MB total)
+	a.imageCacheMutex.Lock()
+	// Limpa cache se muito grande (simples, pode melhorar depois)
+	if len(a.imageCache) > 500 {
+		// Remove metade das entradas mais antigas
+		count := 0
+		for k := range a.imageCache {
+			if count > 250 {
+				break
+			}
+			delete(a.imageCache, k)
+			count++
+		}
+	}
+	a.imageCache[imageURL] = data
+	a.imageCacheMutex.Unlock()
+
+	// Detecta content-type
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
+	}
+
+	// Responde
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	w.Write(data)
 }
 
 // handleVideoProxy faz proxy do vídeo remoto para o cliente local
@@ -3670,4 +3795,1198 @@ func (a *App) SetDiscordShowStatus(enabled bool) error {
 func (a *App) SetDiscordShareAnimes(enabled bool) error {
 	ls := discord.GetLinkingSystem()
 	return ls.SetShareAnimes(enabled)
+}
+
+// ==================== MANGA METHODS ====================
+
+// MangaInfo representa um mangá para o frontend
+type MangaInfo struct {
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Image       string   `json:"image"`
+	URL         string   `json:"url"`
+	LatestChap  string   `json:"latestChapter"`
+	Genres      []string `json:"genres"`
+	Description string   `json:"description"`
+	Status      string   `json:"status"`
+	Source      string   `json:"source"` // Fonte do mangá (mangalivre.to, mangalivre.blog)
+}
+
+// MangaChapterInfo representa um capítulo para o frontend
+type MangaChapterInfo struct {
+	Number    string `json:"number"`
+	Title     string `json:"title"`
+	URL       string `json:"url"`
+	Date      string `json:"date"`
+	MangaID   string `json:"mangaId"`
+	MangaName string `json:"mangaName"`
+}
+
+// MangaPageInfo representa uma página de mangá para o frontend
+type MangaPageInfo struct {
+	Number int    `json:"number"`
+	URL    string `json:"url"`
+}
+
+// MangaSourceInfo representa informações sobre uma fonte de mangá
+type MangaSourceInfo struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	URL         string `json:"url"`
+}
+
+// getSourceFromMangaURL determina a fonte a partir da URL
+func getSourceFromMangaURL(mangaURL string) string {
+	if strings.Contains(mangaURL, "mangalivre.blog") {
+		return "mangalivre.blog"
+	}
+	return "mangalivre.to"
+}
+
+// convertMangaToInfo converte manga.Manga para MangaInfo incluindo a fonte
+func convertMangaToInfo(m manga.Manga, source string) MangaInfo {
+	if source == "" {
+		source = getSourceFromMangaURL(m.URL)
+	}
+	return MangaInfo{
+		ID:          m.ID,
+		Title:       m.Title,
+		Image:       m.Image,
+		URL:         m.URL,
+		LatestChap:  m.LatestChap,
+		Genres:      m.Genres,
+		Description: m.Description,
+		Status:      m.Status,
+		Source:      source,
+	}
+}
+
+// GetPopularMangas retorna os mangás populares (fonte padrão: mangalivre.to)
+func (a *App) GetPopularMangas() []MangaInfo {
+	return a.GetPopularMangasFromSource("mangalivre.to")
+}
+
+// GetPopularMangasFromSource retorna os mangás populares de uma fonte específica
+func (a *App) GetPopularMangasFromSource(sourceName string) []MangaInfo {
+	fmt.Printf("[GetPopularMangasFromSource] Buscando mangás populares da fonte %s...\n", sourceName)
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	source, ok := a.mangaAggregator.GetSource(sourceName)
+	if !ok {
+		fmt.Printf("[GetPopularMangasFromSource] Fonte não encontrada: %s\n", sourceName)
+		return []MangaInfo{}
+	}
+
+	mangas, err := source.GetPopularMangas()
+	if err != nil {
+		fmt.Printf("[GetPopularMangasFromSource] Erro: %v\n", err)
+		return []MangaInfo{}
+	}
+
+	result := make([]MangaInfo, len(mangas))
+	for i, m := range mangas {
+		result[i] = convertMangaToInfo(m, sourceName)
+	}
+
+	fmt.Printf("[GetPopularMangasFromSource] Retornando %d mangás da fonte %s\n", len(result), sourceName)
+	return result
+}
+
+// GetPopularMangasAllSources retorna os mangás populares de TODAS as fontes combinadas
+func (a *App) GetPopularMangasAllSources() []MangaInfo {
+	fmt.Println("[GetPopularMangasAllSources] Buscando mangás populares de todas as fontes...")
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	sources := a.mangaAggregator.GetSources()
+	var allMangas []MangaInfo
+
+	for _, sourceName := range sources {
+		mangas := a.GetPopularMangasFromSource(sourceName)
+		allMangas = append(allMangas, mangas...)
+	}
+
+	fmt.Printf("[GetPopularMangasAllSources] Retornando %d mangás de todas as fontes\n", len(allMangas))
+	return allMangas
+}
+
+// GetLatestMangas retorna os mangás com atualizações recentes (fonte padrão: mangalivre.to)
+func (a *App) GetLatestMangas() []MangaInfo {
+	return a.GetLatestMangasFromSource("mangalivre.to")
+}
+
+// GetLatestMangasFromSource retorna os mangás com atualizações recentes de uma fonte específica
+func (a *App) GetLatestMangasFromSource(sourceName string) []MangaInfo {
+	fmt.Printf("[GetLatestMangasFromSource] Buscando últimas atualizações da fonte %s...\n", sourceName)
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	source, ok := a.mangaAggregator.GetSource(sourceName)
+	if !ok {
+		fmt.Printf("[GetLatestMangasFromSource] Fonte não encontrada: %s\n", sourceName)
+		return []MangaInfo{}
+	}
+
+	mangas, err := source.GetLatestUpdates()
+	if err != nil {
+		fmt.Printf("[GetLatestMangasFromSource] Erro: %v\n", err)
+		return []MangaInfo{}
+	}
+
+	result := make([]MangaInfo, len(mangas))
+	for i, m := range mangas {
+		result[i] = convertMangaToInfo(m, sourceName)
+	}
+
+	fmt.Printf("[GetLatestMangasFromSource] Retornando %d mangás da fonte %s\n", len(result), sourceName)
+	return result
+}
+
+// SearchMangas busca mangás por termo (fonte padrão: mangalivre.to)
+func (a *App) SearchMangas(query string) []MangaInfo {
+	return a.SearchMangasFromSource(query, "mangalivre.to")
+}
+
+// SearchMangasFromSource busca mangás por termo em uma fonte específica
+func (a *App) SearchMangasFromSource(query string, sourceName string) []MangaInfo {
+	fmt.Printf("[SearchMangasFromSource] Buscando '%s' na fonte %s...\n", query, sourceName)
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	source, ok := a.mangaAggregator.GetSource(sourceName)
+	if !ok {
+		fmt.Printf("[SearchMangasFromSource] Fonte não encontrada: %s\n", sourceName)
+		return []MangaInfo{}
+	}
+
+	mangas, err := source.SearchManga(query)
+	if err != nil {
+		fmt.Printf("[SearchMangasFromSource] Erro: %v\n", err)
+		return []MangaInfo{}
+	}
+
+	result := make([]MangaInfo, len(mangas))
+	for i, m := range mangas {
+		result[i] = convertMangaToInfo(m, sourceName)
+	}
+
+	fmt.Printf("[SearchMangasFromSource] Retornando %d mangás da fonte %s\n", len(result), sourceName)
+	return result
+}
+
+// GetMangaDetails obtém detalhes completos de um mangá com cache
+func (a *App) GetMangaDetails(mangaURL string) *MangaInfo {
+	fmt.Printf("[GetMangaDetails] Obtendo detalhes: %s\n", mangaURL)
+
+	// Usa o agregador para detectar a fonte correta
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	sourceName := getSourceFromMangaURL(mangaURL)
+	mangaDetails, err := a.mangaAggregator.GetMangaDetails(mangaURL)
+	if err != nil {
+		fmt.Printf("[GetMangaDetails] Erro: %v\n", err)
+		return nil
+	}
+
+	info := convertMangaToInfo(*mangaDetails, sourceName)
+	return &info
+}
+
+// GetMangaChapters obtém a lista de capítulos de um mangá (detecta fonte pela URL)
+func (a *App) GetMangaChapters(mangaURL string) []MangaChapterInfo {
+	fmt.Printf("[GetMangaChapters] Obtendo capítulos: %s\n", mangaURL)
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	chapters, err := a.mangaAggregator.GetChapters(mangaURL)
+	if err != nil {
+		fmt.Printf("[GetMangaChapters] Erro: %v\n", err)
+		return []MangaChapterInfo{}
+	}
+
+	result := make([]MangaChapterInfo, len(chapters))
+	for i, ch := range chapters {
+		result[i] = MangaChapterInfo{
+			Number:    ch.Number,
+			Title:     ch.Title,
+			URL:       ch.URL,
+			Date:      ch.Date,
+			MangaID:   ch.MangaID,
+			MangaName: ch.MangaName,
+		}
+	}
+
+	fmt.Printf("[GetMangaChapters] Retornando %d capítulos\n", len(result))
+	return result
+}
+
+// GetChapterPages obtém as páginas (imagens) de um capítulo (detecta fonte pela URL)
+func (a *App) GetChapterPages(chapterURL string) []MangaPageInfo {
+	fmt.Printf("[GetChapterPages] Obtendo páginas: %s\n", chapterURL)
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	// Inicia proxy se não estiver rodando
+	if a.proxyPort == 0 {
+		a.startVideoProxy()
+	}
+
+	// Usa o agregador que detecta a fonte correta
+	pages, err := a.mangaAggregator.GetChapterPages(chapterURL)
+	if err != nil {
+		fmt.Printf("[GetChapterPages] Erro: %v\n", err)
+		return []MangaPageInfo{}
+	}
+
+	// Extrai referer do chapterURL
+	referer := "https://mangalivre.to/"
+	if parsed, err := url.Parse(chapterURL); err == nil {
+		referer = fmt.Sprintf("%s://%s/", parsed.Scheme, parsed.Host)
+	}
+
+	result := make([]MangaPageInfo, len(pages))
+	for i, p := range pages {
+		// Usa proxy local para cache e evitar CORS/hotlink protection
+		proxyURL := p.URL
+		if a.proxyPort > 0 {
+			proxyURL = fmt.Sprintf("http://127.0.0.1:%d/manga-image?url=%s&referer=%s",
+				a.proxyPort,
+				url.QueryEscape(p.URL),
+				url.QueryEscape(referer))
+		}
+		result[i] = MangaPageInfo{
+			Number: p.Number,
+			URL:    proxyURL,
+		}
+	}
+
+	// Pré-carrega imagens em background para cache
+	go func() {
+		for _, p := range pages {
+			a.preloadMangaImage(p.URL, referer)
+		}
+	}()
+
+	fmt.Printf("[GetChapterPages] Retornando %d páginas via proxy\n", len(result))
+	return result
+}
+
+// preloadMangaImage pré-carrega uma imagem de mangá no cache
+func (a *App) preloadMangaImage(imageURL, referer string) {
+	a.imageCacheMutex.RLock()
+	_, exists := a.imageCache[imageURL]
+	a.imageCacheMutex.RUnlock()
+
+	if exists {
+		return // Já está no cache
+	}
+
+	req, err := http.NewRequest("GET", imageURL, nil)
+	if err != nil {
+		return
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+	req.Header.Set("Referer", referer)
+
+	resp, err := a.imageClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 200 {
+		data, err := io.ReadAll(resp.Body)
+		if err == nil && len(data) > 0 {
+			a.imageCacheMutex.Lock()
+			a.imageCache[imageURL] = data
+			a.imageCacheMutex.Unlock()
+		}
+	}
+}
+
+// GetMangasByGenre retorna mangás de um gênero específico
+func (a *App) GetMangasByGenre(genre string) []MangaInfo {
+	fmt.Printf("[GetMangasByGenre] Buscando gênero: %s\n", genre)
+
+	if a.mangaClient == nil {
+		a.mangaClient = manga.NewMangaClient()
+	}
+
+	mangas, err := a.mangaClient.GetMangasByGenre(genre)
+	if err != nil {
+		fmt.Printf("[GetMangasByGenre] Erro: %v\n", err)
+		return []MangaInfo{}
+	}
+
+	result := make([]MangaInfo, len(mangas))
+	for i, m := range mangas {
+		result[i] = MangaInfo{
+			ID:         m.ID,
+			Title:      m.Title,
+			Image:      m.Image,
+			URL:        m.URL,
+			LatestChap: m.LatestChap,
+			Genres:     m.Genres,
+		}
+	}
+
+	fmt.Printf("[GetMangasByGenre] Retornando %d mangás\n", len(result))
+	return result
+}
+
+// MangaListResult representa o resultado de listagem de mangás com paginação
+type MangaListResult struct {
+	Mangas     []MangaInfo `json:"mangas"`
+	TotalPages int         `json:"totalPages"`
+	Page       int         `json:"page"`
+}
+
+// GetAllMangas retorna todos os mangás com paginação
+func (a *App) GetAllMangas(page int) MangaListResult {
+	fmt.Printf("[GetAllMangas] Buscando página %d...\n", page)
+
+	if a.mangaClient == nil {
+		a.mangaClient = manga.NewMangaClient()
+	}
+
+	mangas, totalPages, err := a.mangaClient.GetAllMangas(page)
+	if err != nil {
+		fmt.Printf("[GetAllMangas] Erro: %v\n", err)
+		return MangaListResult{Mangas: []MangaInfo{}, TotalPages: 0, Page: page}
+	}
+
+	result := make([]MangaInfo, len(mangas))
+	for i, m := range mangas {
+		result[i] = MangaInfo{
+			ID:         m.ID,
+			Title:      m.Title,
+			Image:      m.Image,
+			URL:        m.URL,
+			LatestChap: m.LatestChap,
+			Genres:     m.Genres,
+		}
+	}
+
+	fmt.Printf("[GetAllMangas] Página %d: Retornando %d mangás (total páginas: %d)\n", page, len(result), totalPages)
+	return MangaListResult{Mangas: result, TotalPages: totalPages, Page: page}
+}
+
+// GetAllMangasComplete busca TODOS os mangás de TODAS as fontes
+func (a *App) GetAllMangasComplete() []MangaInfo {
+	fmt.Println("[GetAllMangasComplete] Buscando TODOS os mangás de todas as fontes (paralelo)...")
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	sources := a.mangaAggregator.GetSources()
+	var allMangas []MangaInfo
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for _, sourceName := range sources {
+		source, ok := a.mangaAggregator.GetSource(sourceName)
+		if !ok {
+			continue
+		}
+
+		wg.Add(1)
+		go func(sourceName string, source manga.MangaSource) {
+			defer wg.Done()
+			localMangas := []MangaInfo{}
+			var pageWg sync.WaitGroup
+			pageChan := make(chan []MangaInfo, 10)
+
+			// Busca até 10 páginas em paralelo
+			for page := 1; page <= 10; page++ {
+				pageWg.Add(1)
+				go func(page int) {
+					defer pageWg.Done()
+					mangas, totalPages, err := source.GetAllMangas(page)
+					if err != nil {
+						fmt.Printf("[GetAllMangasComplete] Erro na fonte %s página %d: %v\n", sourceName, page, err)
+						return
+					}
+					temp := []MangaInfo{}
+					for _, m := range mangas {
+						temp = append(temp, convertMangaToInfo(m, sourceName))
+					}
+					pageChan <- temp
+					if page >= totalPages {
+						// Não busca mais páginas se chegou ao fim
+						return
+					}
+				}(page)
+			}
+
+			pageWg.Wait()
+			close(pageChan)
+			for ms := range pageChan {
+				localMangas = append(localMangas, ms...)
+			}
+			mu.Lock()
+			allMangas = append(allMangas, localMangas...)
+			mu.Unlock()
+		}(sourceName, source)
+	}
+
+	wg.Wait()
+	fmt.Printf("[GetAllMangasComplete] TOTAL FINAL: %d mangás de todas as fontes\n", len(allMangas))
+	return allMangas
+}
+
+// GetAllMangasFromSourceComplete busca TODOS os mangás de UMA fonte específica
+func (a *App) GetAllMangasFromSourceComplete(sourceName string) []MangaInfo {
+	fmt.Printf("[GetAllMangasFromSourceComplete] Buscando todos os mangás da fonte %s...\n", sourceName)
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	source, ok := a.mangaAggregator.GetSource(sourceName)
+	if !ok {
+		fmt.Printf("[GetAllMangasFromSourceComplete] Fonte não encontrada: %s\n", sourceName)
+		return []MangaInfo{}
+	}
+
+	var allMangas []MangaInfo
+
+	// Busca todas as páginas
+	for page := 1; page <= 50; page++ { // Limite de 50 páginas
+		mangas, totalPages, err := source.GetAllMangas(page)
+		if err != nil {
+			fmt.Printf("[GetAllMangasFromSourceComplete] Erro na página %d: %v\n", page, err)
+			break
+		}
+
+		for _, m := range mangas {
+			allMangas = append(allMangas, convertMangaToInfo(m, sourceName))
+		}
+
+		if page >= totalPages {
+			break
+		}
+	}
+
+	fmt.Printf("[GetAllMangasFromSourceComplete] Total: %d mangás da fonte %s\n", len(allMangas), sourceName)
+	return allMangas
+}
+
+// normalizeMangaTitle normaliza o título para comparação
+func normalizeMangaTitle(title string) string {
+	// Remove caracteres especiais e converte para minúsculas
+	title = strings.ToLower(title)
+	title = strings.TrimSpace(title)
+
+	// Remove caracteres especiais comuns
+	replacer := strings.NewReplacer(
+		":", "", "-", "", "–", "", "—", "",
+		"!", "", "?", "", ".", "", ",", "",
+		"'", "", "'", "", "\"", "",
+		"(", "", ")", "", "[", "", "]", "",
+	)
+	title = replacer.Replace(title)
+
+	// Remove espaços extras
+	title = strings.Join(strings.Fields(title), " ")
+
+	return title
+}
+
+// extractChapterCount extrai o número de capítulos do latestChapter
+func extractChapterCount(latestChap string) int {
+	if latestChap == "" {
+		return 0
+	}
+
+	// Tenta extrair número do formato "Cap. 123" ou "Capítulo 123" etc
+	re := regexp.MustCompile(`\d+`)
+	matches := re.FindAllString(latestChap, -1)
+
+	if len(matches) > 0 {
+		// Pega o maior número encontrado
+		maxNum := 0
+		for _, m := range matches {
+			if num, err := strconv.Atoi(m); err == nil && num > maxNum {
+				maxNum = num
+			}
+		}
+		return maxNum
+	}
+	return 0
+}
+
+// GetMergedMangas retorna mangás de todas as fontes, mesclando duplicatas e escolhendo a com mais capítulos
+func (a *App) GetMergedMangas(limit int) []MangaInfo {
+	fmt.Printf("[GetMergedMangas] Buscando e mesclando mangás de todas as fontes (limite: %d)...\n", limit)
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	sources := a.mangaAggregator.GetSources()
+
+	// Mapa para armazenar mangás por título normalizado
+	mangaMap := make(map[string]MangaInfo)
+
+	for _, sourceName := range sources {
+		source, ok := a.mangaAggregator.GetSource(sourceName)
+		if !ok {
+			continue
+		}
+
+		// Busca populares e últimos de cada fonte
+		populares, _ := source.GetPopularMangas()
+		ultimos, _ := source.GetLatestUpdates()
+
+		// Combina ambas as listas
+		allFromSource := append(populares, ultimos...)
+
+		for _, m := range allFromSource {
+			info := convertMangaToInfo(m, sourceName)
+			normalizedTitle := normalizeMangaTitle(info.Title)
+
+			// Verifica se já existe
+			if existing, exists := mangaMap[normalizedTitle]; exists {
+				// Compara quantidade de capítulos
+				existingChapters := extractChapterCount(existing.LatestChap)
+				newChapters := extractChapterCount(info.LatestChap)
+
+				// Escolhe o que tem mais capítulos
+				if newChapters > existingChapters {
+					mangaMap[normalizedTitle] = info
+					fmt.Printf("[GetMergedMangas] '%s': %s (%d caps) > %s (%d caps)\n",
+						info.Title, sourceName, newChapters, existing.Source, existingChapters)
+				}
+			} else {
+				mangaMap[normalizedTitle] = info
+			}
+		}
+	}
+
+	// Converte mapa para slice
+	var result []MangaInfo
+	for _, m := range mangaMap {
+		// Filtra conteúdo adulto
+		if !isAdultManga(m.Genres) {
+			result = append(result, m)
+		}
+	}
+
+	// Ordena por número de capítulos (mais capítulos primeiro)
+	sort.Slice(result, func(i, j int) bool {
+		return extractChapterCount(result[i].LatestChap) > extractChapterCount(result[j].LatestChap)
+	})
+
+	// Aplica limite
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+
+	fmt.Printf("[GetMergedMangas] Retornando %d mangás mesclados\n", len(result))
+	return result
+}
+
+// GetMergedMangasComplete retorna TODOS os mangás mesclados de todas as fontes
+func (a *App) GetMergedMangasComplete() []MangaInfo {
+	fmt.Println("[GetMergedMangasComplete] Buscando e mesclando TODOS os mangás...")
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	sources := a.mangaAggregator.GetSources()
+
+	// Mapa para armazenar mangás por título normalizado
+	mangaMap := make(map[string]MangaInfo)
+
+	for _, sourceName := range sources {
+		source, ok := a.mangaAggregator.GetSource(sourceName)
+		if !ok {
+			continue
+		}
+
+		// Busca todas as páginas (limite de 20 por fonte para performance)
+		for page := 1; page <= 20; page++ {
+			mangas, totalPages, err := source.GetAllMangas(page)
+			if err != nil {
+				break
+			}
+
+			for _, m := range mangas {
+				info := convertMangaToInfo(m, sourceName)
+				normalizedTitle := normalizeMangaTitle(info.Title)
+
+				if existing, exists := mangaMap[normalizedTitle]; exists {
+					existingChapters := extractChapterCount(existing.LatestChap)
+					newChapters := extractChapterCount(info.LatestChap)
+
+					if newChapters > existingChapters {
+						mangaMap[normalizedTitle] = info
+					}
+				} else {
+					mangaMap[normalizedTitle] = info
+				}
+			}
+
+			if page >= totalPages {
+				break
+			}
+		}
+	}
+
+	// Converte e filtra
+	var result []MangaInfo
+	for _, m := range mangaMap {
+		result = append(result, m)
+	}
+
+	// Ordena por capítulos
+	sort.Slice(result, func(i, j int) bool {
+		return extractChapterCount(result[i].LatestChap) > extractChapterCount(result[j].LatestChap)
+	})
+
+	fmt.Printf("[GetMergedMangasComplete] Retornando %d mangás mesclados\n", len(result))
+	return result
+}
+
+// adultGenres são os gêneros considerados conteúdo adulto (+18) - APENAS HENTAI
+var adultGenres = []string{
+	"hentai", "+18", "r18", "r-18", "sexo explicito", "sexo explícito",
+}
+
+// isAdultManga verifica se um mangá contém gêneros adultos (hentai)
+func isAdultManga(genres []string) bool {
+	for _, g := range genres {
+		genreLower := strings.ToLower(strings.TrimSpace(g))
+		for _, adult := range adultGenres {
+			if strings.Contains(genreLower, adult) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// GetPopularMangasSafe retorna mangás populares SEM conteúdo adulto
+func (a *App) GetPopularMangasSafe() []MangaInfo {
+	fmt.Println("[GetPopularMangasSafe] Buscando mangás populares (SFW)...")
+
+	allMangas := a.GetPopularMangas()
+	var safeMangas []MangaInfo
+
+	for _, m := range allMangas {
+		if !isAdultManga(m.Genres) {
+			safeMangas = append(safeMangas, m)
+		}
+	}
+
+	fmt.Printf("[GetPopularMangasSafe] Retornando %d mangás seguros de %d total\n", len(safeMangas), len(allMangas))
+	return safeMangas
+}
+
+// GetPopularMangasAdult retorna APENAS mangás populares com conteúdo adulto
+func (a *App) GetPopularMangasAdult() []MangaInfo {
+	fmt.Println("[GetPopularMangasAdult] Buscando mangás adultos (+18)...")
+
+	allMangas := a.GetPopularMangas()
+	var adultMangas []MangaInfo
+
+	for _, m := range allMangas {
+		if isAdultManga(m.Genres) {
+			adultMangas = append(adultMangas, m)
+		}
+	}
+
+	fmt.Printf("[GetPopularMangasAdult] Retornando %d mangás adultos de %d total\n", len(adultMangas), len(allMangas))
+	return adultMangas
+}
+
+// GetAllMangasSafe retorna TODOS os mangás SEM conteúdo adulto
+func (a *App) GetAllMangasSafe() []MangaInfo {
+	fmt.Println("[GetAllMangasSafe] Buscando todos os mangás (SFW)...")
+
+	allMangas := a.GetAllMangasComplete()
+	var safeMangas []MangaInfo
+
+	for _, m := range allMangas {
+		if !isAdultManga(m.Genres) {
+			safeMangas = append(safeMangas, m)
+		}
+	}
+
+	fmt.Printf("[GetAllMangasSafe] Retornando %d mangás seguros de %d total\n", len(safeMangas), len(allMangas))
+	return safeMangas
+}
+
+// GetAllMangasAdult retorna APENAS mangás com conteúdo adulto
+func (a *App) GetAllMangasAdult() []MangaInfo {
+	fmt.Println("[GetAllMangasAdult] Buscando mangás adultos (+18)...")
+
+	allMangas := a.GetAllMangasComplete()
+	var adultMangas []MangaInfo
+
+	for _, m := range allMangas {
+		if isAdultManga(m.Genres) {
+			adultMangas = append(adultMangas, m)
+		}
+	}
+
+	fmt.Printf("[GetAllMangasAdult] Retornando %d mangás adultos de %d total\n", len(adultMangas), len(allMangas))
+	return adultMangas
+}
+
+// GetFeaturedMangas retorna mangás em destaque de TODAS as fontes (populares + últimas atualizações, sem +18)
+func (a *App) GetFeaturedMangas(limit int) []MangaInfo {
+	return a.GetFeaturedMangasFromSource(limit, "")
+}
+
+// GetFeaturedMangasFromSource retorna mangás em destaque de uma fonte específica
+// Se sourceName for vazio, busca de todas as fontes
+func (a *App) GetFeaturedMangasFromSource(limit int, sourceName string) []MangaInfo {
+	fmt.Printf("[GetFeaturedMangasFromSource] Buscando %d mangás em destaque (fonte: %s)...\n", limit, sourceName)
+
+	if limit <= 0 {
+		limit = 24 // Padrão: 24 mangás
+	}
+
+	var populares []MangaInfo
+
+	if sourceName == "" || sourceName == "all" {
+		// Busca de todas as fontes
+		populares = a.GetPopularMangasAllSources()
+	} else {
+		// Busca de uma fonte específica
+		populares = a.GetPopularMangasFromSource(sourceName)
+	}
+
+	// Filtra conteúdo adulto
+	var safePopulares []MangaInfo
+	for _, m := range populares {
+		if !isAdultManga(m.Genres) {
+			safePopulares = append(safePopulares, m)
+		}
+	}
+
+	// Se tiver mangás suficientes, retorna
+	if len(safePopulares) >= limit {
+		return safePopulares[:limit]
+	}
+
+	// Senão, completa com os últimos updates
+	var latests []MangaInfo
+	if sourceName == "" || sourceName == "all" {
+		// Busca últimos de todas as fontes
+		if a.mangaAggregator == nil {
+			a.mangaAggregator = manga.NewMangaAggregator()
+		}
+		sources := a.mangaAggregator.GetSources()
+		for _, src := range sources {
+			srcLatests := a.GetLatestMangasFromSource(src)
+			latests = append(latests, srcLatests...)
+		}
+	} else {
+		latests = a.GetLatestMangasFromSource(sourceName)
+	}
+
+	seen := make(map[string]bool)
+
+	// Marca os populares como vistos
+	for _, m := range safePopulares {
+		seen[m.URL] = true
+	}
+
+	// Adiciona os últimos que não são duplicados e não são adultos
+	for _, m := range latests {
+		if !seen[m.URL] && !isAdultManga(m.Genres) {
+			safePopulares = append(safePopulares, m)
+			if len(safePopulares) >= limit {
+				break
+			}
+		}
+	}
+
+	fmt.Printf("[GetFeaturedMangasFromSource] Retornando %d mangás em destaque\n", len(safePopulares))
+	return safePopulares
+}
+
+// GetMangaGenres retorna a lista de gêneros disponíveis
+func (a *App) GetMangaGenres() []string {
+	fmt.Println("[GetMangaGenres] Buscando gêneros...")
+
+	if a.mangaClient == nil {
+		a.mangaClient = manga.NewMangaClient()
+	}
+
+	genres, err := a.mangaClient.GetGenres()
+	if err != nil {
+		fmt.Printf("[GetMangaGenres] Erro: %v\n", err)
+		return []string{}
+	}
+
+	fmt.Printf("[GetMangaGenres] Retornando %d gêneros\n", len(genres))
+	return genres
+}
+
+// ============== FUNÇÕES DE MÚLTIPLAS FONTES DE MANGÁ ==============
+
+// GetMangaSourcesInfo retorna informações detalhadas sobre as fontes disponíveis
+func (a *App) GetMangaSourcesInfo() []MangaSourceInfo {
+	sources := a.GetMangaSources()
+	result := make([]MangaSourceInfo, len(sources))
+
+	for i, s := range sources {
+		switch s {
+		case "mangalivre.to":
+			result[i] = MangaSourceInfo{
+				ID:          s,
+				Name:        "MangaLivre.to",
+				Description: "Fonte principal com grande acervo de mangás em português",
+				URL:         "https://mangalivre.to",
+			}
+		case "mangalivre.blog":
+			result[i] = MangaSourceInfo{
+				ID:          s,
+				Name:        "MangaLivre.blog",
+				Description: "Fonte alternativa com mangás atualizados frequentemente",
+				URL:         "https://mangalivre.blog",
+			}
+		default:
+			result[i] = MangaSourceInfo{
+				ID:          s,
+				Name:        s,
+				Description: "Fonte de mangás",
+				URL:         "",
+			}
+		}
+	}
+
+	return result
+}
+
+// GetMangaSources retorna a lista de fontes disponíveis
+func (a *App) GetMangaSources() []string {
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+	return a.mangaAggregator.GetSources()
+}
+
+// GetMangasFromSource busca mangás de uma fonte específica
+func (a *App) GetMangasFromSource(sourceName string, page int) MangaListResult {
+	fmt.Printf("[GetMangasFromSource] Buscando página %d da fonte %s...\n", page, sourceName)
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	mangas, totalPages, err := a.mangaAggregator.GetAllMangasFromSource(sourceName, page)
+	if err != nil {
+		fmt.Printf("[GetMangasFromSource] Erro: %v\n", err)
+		return MangaListResult{Mangas: []MangaInfo{}, TotalPages: 0, Page: page}
+	}
+
+	result := make([]MangaInfo, len(mangas))
+	for i, m := range mangas {
+		result[i] = MangaInfo{
+			ID:         m.ID,
+			Title:      m.Title,
+			Image:      m.Image,
+			URL:        m.URL,
+			LatestChap: m.LatestChap,
+			Genres:     m.Genres,
+		}
+	}
+
+	fmt.Printf("[GetMangasFromSource] Fonte %s, Página %d: %d mangás\n", sourceName, page, len(result))
+	return MangaListResult{Mangas: result, TotalPages: totalPages, Page: page}
+}
+
+// GetMangasFromAllSources busca mangás de todas as fontes combinadas
+func (a *App) GetMangasFromAllSources(page int) MangaListResult {
+	fmt.Printf("[GetMangasFromAllSources] Buscando página %d de todas as fontes...\n", page)
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	mangas, totalPages, err := a.mangaAggregator.GetAllMangasFromAllSources(page)
+	if err != nil {
+		fmt.Printf("[GetMangasFromAllSources] Erro: %v\n", err)
+		return MangaListResult{Mangas: []MangaInfo{}, TotalPages: 0, Page: page}
+	}
+
+	result := make([]MangaInfo, len(mangas))
+	for i, m := range mangas {
+		result[i] = MangaInfo{
+			ID:         m.ID,
+			Title:      m.Title,
+			Image:      m.Image,
+			URL:        m.URL,
+			LatestChap: m.LatestChap,
+			Genres:     m.Genres,
+		}
+	}
+
+	fmt.Printf("[GetMangasFromAllSources] Página %d: %d mangás de todas as fontes\n", page, len(result))
+	return MangaListResult{Mangas: result, TotalPages: totalPages, Page: page}
+}
+
+// SearchMangasAllSources busca mangás em todas as fontes
+func (a *App) SearchMangasAllSources(query string) []MangaInfo {
+	fmt.Printf("[SearchMangasAllSources] Buscando '%s' em todas as fontes...\n", query)
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	mangas, err := a.mangaAggregator.SearchAllSources(query)
+	if err != nil {
+		fmt.Printf("[SearchMangasAllSources] Erro: %v\n", err)
+		return []MangaInfo{}
+	}
+
+	result := make([]MangaInfo, len(mangas))
+	for i, m := range mangas {
+		result[i] = MangaInfo{
+			ID:         m.ID,
+			Title:      m.Title,
+			Image:      m.Image,
+			URL:        m.URL,
+			LatestChap: m.LatestChap,
+			Genres:     m.Genres,
+		}
+	}
+
+	fmt.Printf("[SearchMangasAllSources] Encontrados %d mangás\n", len(result))
+	return result
+}
+
+// GetMangaDetailsAuto obtém detalhes de um mangá (detecta fonte pela URL automaticamente)
+func (a *App) GetMangaDetailsAuto(mangaURL string) *MangaInfo {
+	fmt.Printf("[GetMangaDetailsAuto] Obtendo detalhes: %s\n", mangaURL)
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	mangaDetails, err := a.mangaAggregator.GetMangaDetails(mangaURL)
+	if err != nil {
+		fmt.Printf("[GetMangaDetailsAuto] Erro: %v\n", err)
+		return nil
+	}
+
+	return &MangaInfo{
+		ID:          mangaDetails.ID,
+		Title:       mangaDetails.Title,
+		Image:       mangaDetails.Image,
+		URL:         mangaDetails.URL,
+		Genres:      mangaDetails.Genres,
+		Description: mangaDetails.Description,
+		Status:      mangaDetails.Status,
+	}
+}
+
+// GetMangaChaptersAuto obtém capítulos de um mangá (detecta fonte pela URL automaticamente)
+func (a *App) GetMangaChaptersAuto(mangaURL string) []MangaChapterInfo {
+	fmt.Printf("[GetMangaChaptersAuto] Obtendo capítulos: %s\n", mangaURL)
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	chapters, err := a.mangaAggregator.GetChapters(mangaURL)
+	if err != nil {
+		fmt.Printf("[GetMangaChaptersAuto] Erro: %v\n", err)
+		return []MangaChapterInfo{}
+	}
+
+	result := make([]MangaChapterInfo, len(chapters))
+	for i, ch := range chapters {
+		result[i] = MangaChapterInfo{
+			Number:    ch.Number,
+			Title:     ch.Title,
+			URL:       ch.URL,
+			Date:      ch.Date,
+			MangaID:   ch.MangaID,
+			MangaName: ch.MangaName,
+		}
+	}
+
+	fmt.Printf("[GetMangaChaptersAuto] Retornando %d capítulos\n", len(result))
+	return result
+}
+
+// GetChapterPagesAuto obtém páginas de um capítulo (detecta fonte pela URL automaticamente)
+func (a *App) GetChapterPagesAuto(chapterURL string) []MangaPageInfo {
+	fmt.Printf("[GetChapterPagesAuto] Obtendo páginas: %s\n", chapterURL)
+
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	// Inicia proxy se não estiver rodando
+	if a.proxyPort == 0 {
+		a.startVideoProxy()
+	}
+
+	pages, err := a.mangaAggregator.GetChapterPages(chapterURL)
+	if err != nil {
+		fmt.Printf("[GetChapterPagesAuto] Erro: %v\n", err)
+		return []MangaPageInfo{}
+	}
+
+	// Extrai referer do chapterURL
+	referer := "https://mangalivre.to/"
+	if parsed, err := url.Parse(chapterURL); err == nil {
+		referer = fmt.Sprintf("%s://%s/", parsed.Scheme, parsed.Host)
+	}
+
+	result := make([]MangaPageInfo, len(pages))
+	for i, p := range pages {
+		// Usa proxy local para cache e evitar CORS/hotlink protection
+		proxyURL := p.URL
+		if a.proxyPort > 0 {
+			proxyURL = fmt.Sprintf("http://127.0.0.1:%d/manga-image?url=%s&referer=%s",
+				a.proxyPort,
+				url.QueryEscape(p.URL),
+				url.QueryEscape(referer))
+		}
+		result[i] = MangaPageInfo{
+			Number: p.Number,
+			URL:    proxyURL,
+		}
+	}
+
+	// Pré-carrega imagens em background para cache
+	go func() {
+		for _, p := range pages {
+			a.preloadMangaImage(p.URL, referer)
+		}
+	}()
+
+	fmt.Printf("[GetChapterPagesAuto] Retornando %d páginas via proxy\n", len(result))
+	return result
+}
+
+// GetMergedMangasWithBestSource busca mangás de todas as fontes e mescla inteligentemente
+// escolhendo a versão que tem mais capítulos quando há duplicatas
+func (a *App) GetMergedMangasWithBestSource() []MangaInfo {
+	fmt.Println("[GetMergedMangasWithBestSource] Iniciando merge inteligente de todas as fontes...")
+
+	// Inicializa o aggregator se necessário
+	if a.mangaAggregator == nil {
+		a.mangaAggregator = manga.NewMangaAggregator()
+	}
+
+	// Função para normalizar títulos para comparação
+	normalizeTitleForComparison := func(title string) string {
+		// Remove caracteres especiais e converte para minúsculas
+		title = strings.ToLower(title)
+		reg := regexp.MustCompile(`[^a-z0-9\s]`)
+		title = reg.ReplaceAllString(title, "")
+		title = strings.TrimSpace(title)
+		// Remove espaços extras
+		reg = regexp.MustCompile(`\s+`)
+		title = reg.ReplaceAllString(title, " ")
+		return title
+	}
+
+	// Função para extrair número de capítulos do campo LatestChap
+	extractChapterCount := func(latestChap string) int {
+		if latestChap == "" {
+			return 0
+		}
+		// Tenta extrair número do formato "Cap. XXX" ou "Capítulo XXX"
+		reg := regexp.MustCompile(`(\d+)`)
+		matches := reg.FindStringSubmatch(latestChap)
+		if len(matches) > 1 {
+			num, err := strconv.Atoi(matches[1])
+			if err == nil {
+				return num
+			}
+		}
+		return 0
+	}
+
+	// Mapa para armazenar o melhor mangá por título normalizado
+	bestMangaByTitle := make(map[string]MangaInfo)
+
+	// Busca de cada fonte
+	sourceNames := a.mangaAggregator.GetSources()
+	for _, sourceName := range sourceNames {
+		fmt.Printf("[GetMergedMangasWithBestSource] Buscando da fonte: %s\n", sourceName)
+
+		source, ok := a.mangaAggregator.GetSource(sourceName)
+		if !ok {
+			fmt.Printf("[GetMergedMangasWithBestSource] Fonte não encontrada: %s\n", sourceName)
+			continue
+		}
+
+		// Busca todos os mangás (página por página)
+		page := 1
+		for {
+			mangas, totalPages, err := source.GetAllMangas(page)
+			if err != nil {
+				fmt.Printf("[GetMergedMangasWithBestSource] Erro na fonte %s página %d: %v\n", sourceName, page, err)
+				break
+			}
+
+			for _, m := range mangas {
+				info := convertMangaToInfo(m, sourceName)
+				normalizedTitle := normalizeTitleForComparison(info.Title)
+
+				if existing, exists := bestMangaByTitle[normalizedTitle]; exists {
+					// Compara número de capítulos
+					existingChapters := extractChapterCount(existing.LatestChap)
+					newChapters := extractChapterCount(info.LatestChap)
+
+					if newChapters > existingChapters {
+						fmt.Printf("[GetMergedMangasWithBestSource] Substituindo '%s': %s(%d caps) -> %s(%d caps)\n",
+							info.Title, existing.Source, existingChapters, sourceName, newChapters)
+						bestMangaByTitle[normalizedTitle] = info
+					}
+				} else {
+					bestMangaByTitle[normalizedTitle] = info
+				}
+			}
+
+			if page >= totalPages {
+				break
+			}
+			page++
+		}
+	}
+
+	// Converte mapa para slice
+	result := make([]MangaInfo, 0, len(bestMangaByTitle))
+	for _, manga := range bestMangaByTitle {
+		result = append(result, manga)
+	}
+
+	// Ordena por título
+	sort.Slice(result, func(i, j int) bool {
+		return strings.ToLower(result[i].Title) < strings.ToLower(result[j].Title)
+	})
+
+	fmt.Printf("[GetMergedMangasWithBestSource] Total após merge: %d mangás únicos\n", len(result))
+	return result
 }
