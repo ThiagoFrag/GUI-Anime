@@ -1,3 +1,22 @@
+﻿# Build output
 build/bin
 node_modules
 frontend/dist
+
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+bin/
+
+# Test binaries
+*.test
+
+# Go workspace
+go.work
+go.work.sum
+
+# User data
+goanime_user.json
+discord_config.json
