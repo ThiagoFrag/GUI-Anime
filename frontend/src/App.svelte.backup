@@ -1,0 +1,1408 @@
+<script>
+    import { onMount } from 'svelte';
+    import { GetCurrentUser, CreateUser, BuscarAnimes, GetTopAnimes, GetAnimeURL, GetEpisodes, PlayAnime, TestMPV, SetMPVPath, IsDirectPlayable, GetEpisodeStreamOptions, SetDefaultQuality } from '../wailsjs/go/main/App';
+
+    // Estados (variáveis Svelte normais)
+    let usuario = null;
+    let nomeInput = "";
+    let avatarSelecionado = "avatar1.png";
+
+    // Estados da Home
+    let topAnimes = [];
+    let resultadosBusca = [];
+    let carregando = false;
+    let termoBusca = "";
+    let animeEmFoco = null;
+    let reproducaoEmProgresso = false;
+    let selectedAnime = null;
+    let modalVisible = false;
+    let internalPlayerVisible = false;
+    let playerUrl = "";
+    let videoEl = null;
+    let episodes = [];
+    let selectedEpisodeURL = "";
+    let seasons = [];
+    let selectedSeason = 1;
+    let mpvPathInput = "";
+    let mpvTestOutput = "";
+    let directPlayable = false;
+    let streamOptions = [];
+    let selectedStreamURL = "";
+    let loadingStreams = false;
+    let defaultQuality = "";
+    let episodeSelectionScreen = false;
+    let loadingEpisodes = false;
+    let playingEpisodeNatively = false;
+    let currentPlayingEpisodeTitle = "";
+    let playerChoiceModal = false;
+    let canPlayNatively = false;
+
+    onMount(async () => {
+        try {
+            const user = await GetCurrentUser();
+            if (user && user.username) {
+                usuario = user;
+                // preenche mpvPathInput se houver
+                try { mpvPathInput = user.mpv_path || user.mpvPath || "" } catch(e) { mpvPathInput = "" }
+                try { defaultQuality = user.default_quality || user.DefaultQuality || "" } catch(e) { defaultQuality = "" }
+            }
+        } catch (err) {
+            console.error('Erro GetCurrentUser:', err);
+        }
+
+        await carregarDados();
+    });
+
+    async function carregarDados() {
+        carregando = true;
+        try {
+            topAnimes = (await GetTopAnimes()) || [];
+            console.log('GetTopAnimes carregado ->', topAnimes.slice ? topAnimes.slice(0,5) : topAnimes);
+        } catch (err) {
+            console.error('Erro ao carregar topAnimes:', err);
+            topAnimes = [];
+        } finally {
+            carregando = false;
+        }
+    }
+
+    async function criarConta() {
+        if (!nomeInput) return;
+        try {
+            usuario = await CreateUser(nomeInput, avatarSelecionado);
+            await carregarDados();
+        } catch (err) {
+            console.error('Erro CreateUser:', err);
+        }
+    }
+
+    async function pesquisar() {
+        if (!termoBusca) return;
+        carregando = true;
+        try {
+            const res = (await BuscarAnimes(termoBusca)) || [];
+            resultadosBusca = Array.isArray(res) ? res : [];
+            console.log('BuscarAnimes ->', resultadosBusca.slice ? resultadosBusca.slice(0,5) : resultadosBusca);
+        } catch (err) {
+            console.error('Erro BuscarAnimes:', err);
+            resultadosBusca = [];
+        } finally {
+            carregando = false;
+        }
+    }
+
+    // Função para reproduzir anime diretamente no MPV (mantida)
+    async function reproduzirAnime(anime) {
+        if (!anime || !anime.Title) {
+            console.error('Anime inválido:', anime);
+            alert('Anime inválido');
+            return;
+        }
+
+        reproducaoEmProgresso = true;
+        animeEmFoco = null;
+
+        try {
+            let url = anime.URL;
+
+            // Se não tiver URL, busca agora
+            if (!url) {
+                console.log('Buscando URL para:', anime.Title);
+                url = await GetAnimeURL(anime.Title);
+                anime.URL = url;
+            }
+
+            if (!url) {
+                alert('URL do anime não encontrada.');
+                return;
+            }
+
+            console.log('Reproduzindo anime:', anime.Title, 'com URL:', url);
+            await PlayAnime(url);
+            console.log('Reprodução iniciada com sucesso');
+        } catch (err) {
+            console.error('Erro ao reproduzir anime:', err);
+            alert('Erro ao abrir no MPV: ' + (err.message || err));
+        } finally {
+            reproducaoEmProgresso = false;
+        }
+    }
+
+    // Abre tela de seleção de episódios
+    async function openEpisodeSelection(anime) {
+        selectedAnime = anime;
+        episodeSelectionScreen = true;
+        playerUrl = anime.URL || "";
+        episodes = [];
+        loadingEpisodes = true;
+
+        // Se não tiver URL da série, tenta obter
+        if (!playerUrl) {
+            try {
+                playerUrl = await GetAnimeURL(anime.Title);
+                selectedAnime.URL = playerUrl;
+            } catch (err) {
+                console.error('Erro ao buscar URL:', err);
+                alert('Não foi possível obter a URL do anime.');
+                episodeSelectionScreen = false;
+                loadingEpisodes = false;
+                return;
+            }
+        }
+
+        // Tenta obter lista de episódios via backend
+        try {
+            const eps = await GetEpisodes(playerUrl);
+            episodes = Array.isArray(eps) ? eps : [];
+            
+            // Criar lista de seasons
+            const s = new Set();
+            episodes.forEach(e => s.add(e.Season || 1));
+            seasons = Array.from(s).sort((a,b)=>a-b);
+            selectedSeason = seasons.length ? seasons[0] : 1;
+            
+            // Limpar seleção
+            selectedEpisodeURL = "";
+            streamOptions = [];
+            selectedStreamURL = "";
+        } catch (err) {
+            console.error('Erro ao buscar episódios:', err);
+            episodes = [];
+        } finally {
+            loadingEpisodes = false;
+        }
+    }
+
+    function closeEpisodeSelection() {
+        episodeSelectionScreen = false;
+        selectedAnime = null;
+        episodes = [];
+        selectedEpisodeURL = "";
+        streamOptions = [];
+        selectedStreamURL = "";
+    }
+
+    async function playEpisode() {
+        if (!selectedEpisodeURL) {
+            alert('Selecione um episódio');
+            return;
+        }
+        
+        const urlToPlay = selectedStreamURL || selectedEpisodeURL;
+        const currentEp = episodes.find(e => e.URL === selectedEpisodeURL);
+        currentPlayingEpisodeTitle = currentEp ? `Ep ${currentEp.Number || '?'} - ${currentEp.Title || 'Sem título'}` : 'Episódio';
+        playerUrl = urlToPlay;
+        
+        // Verificar se pode usar player nativo
+        try {
+            canPlayNatively = await IsDirectPlayable(urlToPlay);
+        } catch (e) {
+            canPlayNatively = false;
+        }
+        
+        // Mostrar modal de escolha
+        playerChoiceModal = true;
+    }
+
+    function playWithNativePlayer() {
+        console.log('[playWithNativePlayer] Starting...');
+        console.log('[playWithNativePlayer] playerUrl:', playerUrl);
+        console.log('[playWithNativePlayer] currentPlayingEpisodeTitle:', currentPlayingEpisodeTitle);
+        playerChoiceModal = false;
+        episodeSelectionScreen = false;
+        playingEpisodeNatively = true;
+        console.log('[playWithNativePlayer] playingEpisodeNatively set to true');
+        console.log('[playWithNativePlayer] videoEl:', videoEl);
+        // Force update and give time for video element to appear
+        setTimeout(() => {
+            console.log('[playWithNativePlayer] After timeout, videoEl:', videoEl);
+            if (videoEl) {
+                console.log('[playWithNativePlayer] Video element found, src:', videoEl.src);
+            }
+        }, 100);
+    }
+
+    async function playWithMPVPlayer() {
+        playerChoiceModal = false;
+        episodeSelectionScreen = false;
+        
+        try {
+            await PlayAnime(playerUrl);
+        } catch (err) {
+            console.error('Erro ao reproduzir com MPV:', err);
+            alert('Erro ao iniciar MPV: ' + (err.message || err));
+        }
+    }
+
+    function backToEpisodeSelection() {
+        playingEpisodeNatively = false;
+        playerUrl = "";
+        currentPlayingEpisodeTitle = "";
+        if (videoEl && typeof videoEl.pause === 'function') videoEl.pause();
+    }
+
+    function closeNativePlayer() {
+        backToEpisodeSelection();
+        closeEpisodeSelection();
+    }
+
+    // Abre modal com opções e carrega episódios (temporadas/eps)
+    async function openPlayerOptions(anime) {
+        selectedAnime = anime;
+        modalVisible = true;
+        playerUrl = anime.URL || "";
+        episodes = [];
+        selectedEpisode = null;
+
+        // Se não tiver URL da série, tenta obter
+        if (!playerUrl) {
+            try {
+                playerUrl = await GetAnimeURL(anime.Title);
+                selectedAnime.URL = playerUrl;
+            } catch (err) {
+                console.error('Erro ao buscar URL:', err);
+                alert('Não foi possível obter a URL do anime.');
+                modalVisible = false;
+                return;
+            }
+        }
+
+        // verifica se a URL da série é diretamente reproduzível
+        try { directPlayable = await IsDirectPlayable(playerUrl); } catch(e) { directPlayable = false }
+
+        // Tenta obter lista de episódios via backend
+        try {
+            const eps = await GetEpisodes(playerUrl);
+            episodes = Array.isArray(eps) ? eps : [];
+            // criar lista de seasons (aqui heurístico, usamos Season campo)
+            const s = new Set();
+            episodes.forEach(e => s.add(e.Season || 1));
+            seasons = Array.from(s).sort((a,b)=>a-b);
+            selectedSeason = seasons.length ? seasons[0] : 1;
+            // NÃO pré-selecionar episódio: obrigar usuário a escolher explicitamente
+            selectedEpisodeURL = "";
+            streamOptions = [];
+            selectedStreamURL = "";
+            // verifica se a série em si é direta (apenas para informação)
+            try { directPlayable = await IsDirectPlayable(playerUrl); } catch(e) { directPlayable = false }
+        } catch (err) {
+            console.error('Erro ao buscar episódios:', err);
+            // Sem episódios, deixamos apenas a URL da série
+            episodes = [];
+        }
+    }
+
+    // verifica se uma URL é reproduzível internamente
+    async function checkDirectPlayable(url) {
+        if (!url) { directPlayable = false; return; }
+        try {
+            directPlayable = await IsDirectPlayable(url);
+        } catch (err) {
+            directPlayable = false;
+        }
+    }
+
+    async function loadStreamOptions(title, episodeURL) {
+        streamOptions = [];
+        selectedStreamURL = "";
+        if (!episodeURL) return;
+        loadingStreams = true;
+        try {
+            const opts = await GetEpisodeStreamOptions(title, episodeURL);
+            streamOptions = Array.isArray(opts) ? opts : [];
+            if (streamOptions.length) {
+                // aplica qualidade padrão do usuário se disponível
+                let pref = defaultQuality || (usuario && (usuario.default_quality || usuario.DefaultQuality)) || "";
+                let found = null;
+                if (pref) {
+                    found = streamOptions.find(s => s.Quality === pref);
+                }
+                selectedStreamURL = (found && found.URL) ? found.URL : streamOptions[0].URL;
+            }
+        } catch (err) {
+            console.error('Erro GetEpisodeStreamOptions:', err);
+            streamOptions = [];
+        } finally {
+            loadingStreams = false;
+        }
+    }
+
+    async function playWithMPV() {
+        if (!playerUrl) {
+            alert('URL não disponível');
+            return;
+        }
+        modalVisible = false;
+        try {
+            await PlayAnime(playerUrl);
+        } catch (err) {
+            console.error(err);
+            alert('Erro ao iniciar o MPV: ' + (err.message || err));
+        }
+    }
+
+    function openInternalPlayer() {
+        if (!playerUrl) {
+            alert('URL não disponível');
+            return;
+        }
+        modalVisible = false;
+        internalPlayerVisible = true;
+        // small delay to ensure DOM
+        setTimeout(() => {
+            if (videoEl && typeof videoEl.play === 'function') videoEl.play();
+        }, 100);
+    }
+
+    function closeInternalPlayer() {
+        if (videoEl && typeof videoEl.pause === 'function') videoEl.pause();
+        internalPlayerVisible = false;
+        playerUrl = "";
+        selectedAnime = null;
+    }
+
+    // --- Configurações MPV ---
+    async function testMPVPath() {
+        mpvTestOutput = 'Testando...';
+        try {
+            const out = await TestMPV(mpvPathInput || "");
+            mpvTestOutput = out || 'OK';
+        } catch (err) {
+            mpvTestOutput = (err && err.message) ? err.message : JSON.stringify(err);
+        }
+    }
+
+    async function saveMPVPath() {
+        try {
+            await SetMPVPath(mpvPathInput || "");
+            mpvTestOutput = 'Caminho salvo';
+            // atualiza o usuário local
+            try { usuario = await GetCurrentUser(); } catch(e){}
+        } catch (err) {
+            mpvTestOutput = (err && err.message) ? err.message : JSON.stringify(err);
+        }
+    }
+
+    async function saveDefaultQuality() {
+        try {
+            await SetDefaultQuality(defaultQuality || "");
+            // atualiza o usuário local
+            try { usuario = await GetCurrentUser(); } catch(e){}
+            mpvTestOutput = 'Qualidade padrão salva';
+        } catch (err) {
+            mpvTestOutput = (err && err.message) ? err.message : JSON.stringify(err);
+        }
+    }
+
+    // revalida quando o episódio selecionado muda
+    $: if (selectedEpisodeURL) { checkDirectPlayable(selectedEpisodeURL); }
+    $: if (!selectedEpisodeURL && playerUrl) { checkDirectPlayable(playerUrl); }
+</script>
+
+<main>
+    {#if !usuario}
+        <div class="login-screen">
+            <div class="login-card">
+                <h1>GoAnime <span class="destaque">GUI</span></h1>
+                <p>Quem está assistindo?</p>
+                
+                <div class="avatar-selection">
+                    <button type="button" 
+                            class="avatar {avatarSelecionado === 'avatar1.png' ? 'selected' : ''}" 
+                            onclick={() => avatarSelecionado = 'avatar1.png'}>
+                        👤
+                    </button>
+                    <button type="button" 
+                            class="avatar {avatarSelecionado === 'avatar2.png' ? 'selected' : ''}" 
+                            onclick={() => avatarSelecionado = 'avatar2.png'}>
+                        🦊
+                    </button>
+                    <button type="button" 
+                            class="avatar {avatarSelecionado === 'avatar3.png' ? 'selected' : ''}" 
+                            onclick={() => avatarSelecionado = 'avatar3.png'}>
+                        🤖
+                    </button>
+                </div>
+
+                <input type="text" bind:value={nomeInput} placeholder="Digite seu nome..." />
+                <button class="btn-entrar" onclick={criarConta}>Entrar</button>
+            </div>
+        </div>
+
+    {:else}
+        <div class="dashboard">
+            <nav class="sidebar">
+                <div class="user-profile">
+                    <div class="avatar-small">
+                        {usuario.avatar === 'avatar1.png' ? '👤' : usuario.avatar === 'avatar2.png' ? '🦊' : '🤖'}
+                    </div>
+                    <span>{usuario.username}</span>
+                </div>
+                <div class="menu-items">
+                    <button class="active">🏠 Início</button>
+                    <button>❤️ Favoritos</button>
+                    <div style="margin-top:18px; padding-top:12px; border-top:1px solid #222">
+                        <h4 style="margin:6px 0 8px 0; font-size:0.9rem">⚙️ Configurações</h4>
+                        <div style="display:flex; flex-direction:column; gap:6px">
+                            <div style="display:flex; gap:8px; align-items:center">
+                                <label for="quality-select" style="font-size:0.85rem; color:#bbb; min-width:90px">Qualidade padrão</label>
+                                <select id="quality-select" bind:value={defaultQuality} style="flex:1; padding:8px; border-radius:6px; background:#0b0c10; border:1px solid #222; color:white;">
+                                    <option value="">Automático</option>
+                                    <option value="best">best</option>
+                                    <option value="1080p">1080p</option>
+                                    <option value="720p">720p</option>
+                                    <option value="480p">480p</option>
+                                    <option value="360p">360p</option>
+                                    <option value="worst">worst</option>
+                                </select>
+                            </div>
+                            <input type="text" id="mpv-path-input" bind:value={mpvPathInput} placeholder="Caminho para mpv.exe (opcional)" style="padding:8px; border-radius:6px; background:#0b0c10; border:1px solid #222; color:white;" />
+                            <div style="display:flex; gap:8px">
+                                <button onclick={testMPVPath} style="flex:1; padding:8px; border-radius:6px; background:#f7768e;">Testar MPV</button>
+                                <button onclick={saveMPVPath} style="flex:1; padding:8px; border-radius:6px; background:#2f8be6;">Salvar MPV</button>
+                                <button onclick={saveDefaultQuality} style="flex:1; padding:8px; border-radius:6px; background:#4caf50;">Salvar Qualidade</button>
+                            </div>
+                            <pre style="margin:0; font-size:0.75rem; color:#bbb; white-space:pre-wrap;">{mpvTestOutput}</pre>
+                        </div>
+                    </div>
+                </div>
+            </nav>
+
+            <div class="content">
+                <div class="header-search">
+                    <input 
+                        type="text" 
+                        bind:value={termoBusca} 
+                        onkeydown={(e) => e.key === 'Enter' && pesquisar()}
+                        placeholder="Pesquisar animes..." 
+                    />
+                </div>
+
+                {#if resultadosBusca.length > 0}
+                     <section>
+                        <h2>Resultados</h2>
+                        <div class="grid-animes">
+                            {#each resultadosBusca as anime}
+                                  <div class="card-anime" 
+                                      role="button"
+                                      tabindex="0"
+                                      onmouseenter={() => animeEmFoco = anime} 
+                                      onmouseleave={() => animeEmFoco = null}
+                                      onclick={() => openEpisodeSelection(anime)}
+                                      onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openEpisodeSelection(anime)}>
+                                    <div class="img-box">
+                                        <img src={anime.Image || '/assets/placeholder.png'} alt={anime.Title || 'Capa'} />
+                                    </div>
+                                    <h3>{anime.Title}</h3>
+
+                                    {#if animeEmFoco === anime}
+                                        <div class="player-preview">
+                                            {#if reproducaoEmProgresso}
+                                                <div class="loading-spinner">⌛</div>
+                                                <p>Carregando...</p>
+                                            {:else}
+                                                <div class="play-button">▶</div>
+                                                <p>Assistir agora</p>
+                                            {/if}
+                                        </div>
+                                    {/if}
+                                </div>
+                            {/each}
+                        </div>
+                        <button class="btn-clear" onclick={() => resultadosBusca = []}>Voltar</button>
+                     </section>
+                {:else}
+                    <div class="hero-banner">
+                        <div class="hero-info">
+                            <h1>Bem-vindo, {usuario.username}!</h1>
+                            <p>O que vamos assistir hoje?</p>
+                        </div>
+                    </div>
+
+                    <section>
+                        <h2>🔥 Populares</h2>
+                        <div class="scroll-horizontal">
+                            {#each topAnimes as anime}
+                                  <div class="card-anime min" 
+                                      role="button"
+                                      tabindex="0"
+                                      onmouseenter={() => animeEmFoco = anime} 
+                                      onmouseleave={() => animeEmFoco = null}
+                                      onclick={() => openEpisodeSelection(anime)}
+                                      onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openEpisodeSelection(anime)}>
+                                    <div class="img-box">
+                                        <img src={anime.Image || '/assets/placeholder.png'} alt={anime.Title || 'Capa'} />
+                                    </div>
+                                    <h3>{anime.Title}</h3>
+
+                                    {#if animeEmFoco === anime}
+                                        <div class="player-preview">
+                                            {#if reproducaoEmProgresso}
+                                                <div class="loading-spinner">⌛</div>
+                                                <p>Carregando...</p>
+                                            {:else}
+                                                <div class="play-button">▶</div>
+                                                <p>Assistir</p>
+                                            {/if}
+                                        </div>
+                                    {/if}
+                                </div>
+                            {/each}
+                        </div>
+                    </section>
+                {/if}
+                
+                {#if modalVisible}
+                    <div class="modal-overlay" onclick={() => modalVisible = false}>
+                        <div class="modal-card" onclick={(e) => e.stopPropagation()}>
+                            <h3>{selectedAnime ? selectedAnime.Title : 'Abrir anime'}</h3>
+                            {#if episodes && episodes.length > 0}
+                                <p style="margin:12px 0; font-weight: bold; color:#bbb">Selecione temporada e episódio:</p>
+                                <div style="display:flex; flex-direction:column; gap:12px; margin-top:12px">
+                                    <div>
+                                        <label for="season-select" style="display:block; font-size:0.85rem; color:#bbb; margin-bottom:4px">Temporada:</label>
+                                        <select id="season-select" bind:value={selectedSeason} onchange={() => {
+                                            selectedEpisodeURL = "";
+                                            streamOptions = [];
+                                            selectedStreamURL = "";
+                                        }} style="width:100%; padding:8px; border-radius:6px; background:#0b0c10; color:white; border:1px solid #222">
+                                            {#each seasons as s}
+                                                <option value={s}>Temporada {s}</option>
+                                            {/each}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label for="episode-select" style="display:block; font-size:0.85rem; color:#bbb; margin-bottom:4px">Episódio:</label>
+                                        <select id="episode-select" bind:value={selectedEpisodeURL} onchange={() => { 
+                                            streamOptions = [];
+                                            selectedStreamURL = "";
+                                            loadStreamOptions(selectedAnime.Title, selectedEpisodeURL); 
+                                        }} style="width:100%; padding:8px; border-radius:6px; background:#0b0c10; color:white; border:1px solid #222">
+                                            <option value="">-- Escolha um episódio --</option>
+                                            {#each episodes.filter(e => (e.Season||1) == selectedSeason) as ep}
+                                                <option value={ep.URL}>{ep.Number ? `Ep ${ep.Number}` : 'Especial'} - {ep.Title || 'Sem título'}</option>
+                                            {/each}
+                                        </select>
+                                    </div>
+                                </div>
+                                <div style="margin-top:12px">
+                                    {#if loadingStreams}
+                                        <div style="font-size:0.9rem; color:#bbb; padding:12px; background:rgba(255,255,255,0.05); border-radius:6px">⏳ Carregando opções de qualidade...</div>
+                                    {:else if selectedEpisodeURL}
+                                        {#if streamOptions.length}
+                                            <div style="margin:0; display:flex; flex-direction:column; gap:8px; align-items:stretch">
+                                                <label for="quality-select-modal" style="font-size:0.85rem; color:#bbb">Selecione qualidade:</label>
+                                                <select id="quality-select-modal" bind:value={selectedStreamURL} style="width:100%; padding:8px; border-radius:6px; background:#0b0c10; color:white; border:1px solid #222">
+                                                    {#each streamOptions as s}
+                                                        <option value={s.URL}>{s.Quality}</option>
+                                                    {/each}
+                                                </select>
+                                            </div>
+                                        {:else}
+                                            <div style="font-size:0.9rem; color:#f7768e; padding:12px; background:rgba(255,255,255,0.05); border-radius:6px">❌ Nenhuma qualidade disponível para este episódio.</div>
+                                        {/if}
+                                    {/if}
+                                </div>
+                                <div class="modal-actions" style="margin-top:12px">
+                                    <button class="btn-mpv" onclick={() => {
+                                        const urlToPlay = selectedStreamURL || selectedEpisodeURL;
+                                        if (urlToPlay) {
+                                            playerUrl = urlToPlay; playWithMPV();
+                                        } else {
+                                            alert('Selecione um episódio válido antes de escolher o player');
+                                        }
+                                    }} disabled={!selectedEpisodeURL}>Abrir episódio no MPV</button>
+                                    <button class="btn-player" onclick={() => {
+                                        if (!selectedEpisodeURL) { alert('Selecione um episódio antes de escolher o player'); return; }
+                                        if (!directPlayable) { alert('Player interno disponível apenas para streams diretos (mp4/m3u8). Use MPV para outros casos.'); return; }
+                                        const urlToPlay = selectedStreamURL || selectedEpisodeURL;
+                                        if (urlToPlay) {
+                                            playerUrl = urlToPlay; openInternalPlayer();
+                                        } else {
+                                            alert('Selecione um episódio válido');
+                                        }
+                                    }} disabled={!directPlayable || !selectedEpisodeURL}>Reproduzir episódio no player interno</button>
+                                </div>
+                                <div style="margin-top:12px; padding:12px; background:rgba(255,255,255,0.05); border-radius:6px; font-size:0.9rem; color:#bbb">
+                                    {#if selectedEpisodeURL}
+                                        📺 <strong>URL do episódio:</strong><br><code style="word-break: break-all; font-size:0.8rem">{selectedStreamURL || selectedEpisodeURL}</code>
+                                    {:else}
+                                        <em>👆 Selecione um episódio acima</em>
+                                    {/if}
+                                </div>
+                            {:else}
+                                <p>Escolha como deseja assistir:</p>
+                                <div class="modal-actions">
+                                    <button class="btn-mpv" onclick={playWithMPV}>Abrir no MPV (PC)</button>
+                                    <button class="btn-player" onclick={() => { if (!directPlayable) { alert('Player interno disponível apenas para streams diretos (mp4/m3u8). Use MPV para outros casos.'); return; } openInternalPlayer(); }} disabled={!directPlayable}>{directPlayable ? 'Player interno' : 'Player interno (apenas streams diretos)'}</button>
+                                </div>
+                                <div style="margin-top:8px; color:#bbb; font-size:0.85rem">URL: {playerUrl ? playerUrl : 'não disponível'}</div>
+                            {/if}
+                        </div>
+                    </div>
+                {/if}
+
+                                {#if internalPlayerVisible}
+                    <div class="video-overlay">
+                        <button type="button" class="video-close" onclick={closeInternalPlayer}>✕</button>
+                        <video bind:this={videoEl} src={playerUrl} controls autoplay>
+                            <track kind="captions" />
+                            Seu navegador não suporta a tag &lt;video&gt;.
+                        </video>
+                    </div>
+                {/if}
+
+                {#if episodeSelectionScreen && !playingEpisodeNatively}
+                    <div class="episode-screen-overlay">
+                        <div class="episode-screen">
+                            <div class="episode-header">
+                                <button type="button" class="close-btn" onclick={closeEpisodeSelection}>← Voltar</button>
+                                <h2>📺 {selectedAnime?.Title || 'Episódios'}</h2>
+                                <div style="width: 80px;"></div>
+                            </div>
+
+                            {#if loadingEpisodes}
+                                <div class="loading-container">
+                                    <div class="loading-spinner">⌛</div>
+                                    <p>Carregando episódios...</p>
+                                </div>
+                            {:else if episodes.length === 0}
+                                <div class="no-episodes">
+                                    <p>😕 Nenhum episódio encontrado</p>
+                                    <button type="button" onclick={closeEpisodeSelection} class="btn-back">← Voltar</button>
+                                </div>
+                            {:else}
+                                <div class="episode-content">
+                                    <div class="season-selector">
+                                        <label for="season-select-screen">Temporada:</label>
+                                        <select id="season-select-screen" bind:value={selectedSeason} onchange={() => {
+                                            selectedEpisodeURL = "";
+                                            streamOptions = [];
+                                            selectedStreamURL = "";
+                                        }} class="select-input">
+                                            {#each seasons as s}
+                                                <option value={s}>Temporada {s}</option>
+                                            {/each}
+                                        </select>
+                                    </div>
+
+                                    <div class="episodes-grid">
+                                        {#each episodes.filter(e => (e.Season||1) == selectedSeason) as ep}
+                                            <button 
+                                                type="button"
+                                                class="episode-card {selectedEpisodeURL === ep.URL ? 'selected' : ''}"
+                                                onclick={() => {
+                                                    selectedEpisodeURL = ep.URL;
+                                                    streamOptions = [];
+                                                    selectedStreamURL = "";
+                                                    loadStreamOptions(selectedAnime.Title, ep.URL);
+                                                }}>
+                                                <div class="ep-number">#{ep.Number || '?'}</div>
+                                                <div class="ep-title">{ep.Title || 'Sem título'}</div>
+                                            </button>
+                                        {/each}
+                                    </div>
+
+                                    {#if selectedEpisodeURL}
+                                        <div class="playback-controls">
+                                            {#if loadingStreams}
+                                                <div class="quality-loading">⏳ Carregando qualidades...</div>
+                                            {:else if streamOptions.length > 0}
+                                                <div class="quality-selector">
+                                                    <label for="quality-select-screen">Qualidade:</label>
+                                                    <select id="quality-select-screen" bind:value={selectedStreamURL} class="select-input">
+                                                        {#each streamOptions as s}
+                                                            <option value={s.URL}>{s.Quality}</option>
+                                                        {/each}
+                                                    </select>
+                                                </div>
+                                            {:else}
+                                                <div class="quality-loading">Nenhuma qualidade disponível</div>
+                                            {/if}
+                                            <button type="button" class="btn-play" onclick={playEpisode}>▶ Reproduzir</button>
+                                        </div>
+                                    {:else}
+                                        <div class="no-selection">👆 Selecione um episódio acima para começar</div>
+                                    {/if}
+                                </div>
+                            {/if}
+                        </div>
+                    </div>
+                {/if}
+
+                {#if playerChoiceModal}
+                    <div class="player-choice-overlay">
+                        <div class="player-choice-modal">
+                            <h3>Escolha um player</h3>
+                            <p>Como você deseja assistir?</p>
+                            
+                            <div class="choice-buttons">
+                                <button type="button" class="choice-btn choice-mpv" onclick={playWithMPVPlayer}>
+                                    <div class="choice-icon">🖥️</div>
+                                    <div class="choice-label">MPV (PC)</div>
+                                    <div class="choice-desc">Player recomendado para qualidade</div>
+                                </button>
+                                
+                                {#if canPlayNatively}
+                                    <button type="button" class="choice-btn choice-native" onclick={playWithNativePlayer}>
+                                        <div class="choice-icon">▶️</div>
+                                        <div class="choice-label">Player Nativo</div>
+                                        <div class="choice-desc">Reproduzir no navegador</div>
+                                    </button>
+                                {:else}
+                                    <button type="button" class="choice-btn choice-native disabled" disabled>
+                                        <div class="choice-icon">▶️</div>
+                                        <div class="choice-label">Player Nativo</div>
+                                        <div class="choice-desc">Não disponível (use MPV)</div>
+                                    </button>
+                                {/if}
+                            </div>
+                            
+                            <button type="button" class="choice-cancel" onclick={() => playerChoiceModal = false}>Cancelar</button>
+                        </div>
+                    </div>
+                {/if}
+
+                {#if playingEpisodeNatively}
+                    <div class="native-player-overlay">
+                        <div class="native-player-container">
+                            <div class="player-top-bar">
+                                <div class="player-info">
+                                    <h3>{selectedAnime?.Title}</h3>
+                                    <p>{currentPlayingEpisodeTitle}</p>
+                                </div>
+                                <button type="button" class="btn-close-player" onclick={closeNativePlayer}>✕ Sair</button>
+                            </div>
+                            
+                            <video bind:this={videoEl} src={playerUrl} controls autoplay class="native-video">
+                                <track kind="captions" />
+                                Seu navegador não suporta a tag &lt;video&gt;.
+                            </video>
+
+                            <div class="player-bottom-controls">
+                                <button type="button" class="btn-controls" onclick={backToEpisodeSelection}>← Voltar para Episódios</button>
+                                <div class="player-info-bottom">▶ Em reprodução</div>
+                                <button type="button" class="btn-controls" onclick={closeNativePlayer}>Sair ✕</button>
+                            </div>
+                        </div>
+                    </div>
+                {/if}
+            </div>
+        </div>
+    {/if}
+</main>
+
+<style>
+    /* RESET BÁSICO */
+    :global(body) { margin: 0; background-color: #000; color: white; font-family: sans-serif; overflow: hidden; }
+    button { cursor: pointer; border: none; outline: none; }
+
+    /* LOGIN */
+    .login-screen { height: 100vh; display: flex; align-items: center; justify-content: center; background: radial-gradient(#1f2233, #000); }
+    .login-card { background: #141519; padding: 40px; border-radius: 12px; text-align: center; border: 1px solid #333; }
+    
+    .avatar-selection { display: flex; justify-content: center; gap: 15px; margin: 20px 0; }
+    
+    /* ESTILO DOS BOTÕES DE AVATAR */
+    .avatar { 
+        width: 60px; height: 60px; 
+        background: #222; 
+        border-radius: 50%; 
+        font-size: 30px; 
+        display: flex; align-items: center; justify-content: center;
+        transition: 0.2s;
+        border: 2px solid transparent;
+    }
+    .avatar:hover { transform: scale(1.1); background: #333; }
+    .avatar.selected { border-color: #f7768e; background: #2f334d; }
+
+    .login-card input { padding: 10px; border-radius: 5px; border: 1px solid #333; background: #000; color: white; margin-bottom: 15px; width: 80%; }
+    .btn-entrar { padding: 10px 30px; background: #f7768e; color: black; font-weight: bold; border-radius: 5px; width: 90%; }
+
+    /* DASHBOARD */
+    .dashboard { display: flex; height: 100vh; }
+    .sidebar { width: 220px; background: #141519; padding: 20px; border-right: 1px solid #222; }
+    .user-profile { display: flex; align-items: center; gap: 10px; margin-bottom: 30px; }
+    .avatar-small { width: 35px; height: 35px; background: #333; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+    
+    .menu-items button { display: block; width: 100%; text-align: left; padding: 10px; background: transparent; color: #888; font-size: 16px; }
+    .menu-items button.active { color: #f7768e; background: rgba(247,118,142,0.1); border-radius: 5px; }
+
+    .content { flex: 1; padding: 20px; overflow-y: auto; }
+    .header-search input { width: 100%; max-width: 400px; padding: 10px; border-radius: 20px; border: 1px solid #333; background: #1a1b26; color: white; }
+
+    .grid-animes { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 15px; margin-top: 20px; }
+    .card-anime { background: #1a1b26; border-radius: 8px; overflow: hidden; padding-bottom: 10px; transition: 0.3s; position: relative; cursor: pointer; }
+    .card-anime:hover { transform: scale(1.05); }
+    .img-box { height: 320px; background: #333; }
+    .img-box img { width: 100%; height: 100%; object-fit: cover; }
+    .card-anime h3 { font-size: 0.9rem; margin: 10px 5px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+
+    .scroll-horizontal { display: flex; gap: 15px; overflow-x: auto; padding: 10px 0; }
+    .min { width: 180px; flex-shrink: 0; }
+    
+    .hero-banner { background: linear-gradient(to right, #222, transparent); padding: 40px; border-radius: 10px; margin-top: 20px; }
+
+    .player-preview {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        top: 0;
+        background: rgba(0, 0, 0, 0.85);
+        color: white;
+        padding: 10px;
+        border-radius: 5px;
+        text-align: center;
+        z-index: 10;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        cursor: pointer;
+        transition: 0.2s;
+        border: none;
+        font-family: inherit;
+    }
+
+    .player-preview:hover {
+        background: rgba(247, 118, 142, 0.9);
+    }
+
+    .play-button {
+        font-size: 3rem;
+        text-shadow: 0 0 10px rgba(247, 118, 142, 0.8);
+    }
+
+    .loading-spinner {
+        font-size: 2rem;
+        animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+    }
+
+    .player-preview p {
+        margin: 0;
+        font-weight: bold;
+        font-size: 0.9rem;
+    }
+
+    /* Modal de escolha */
+    .modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,0.7);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 50;
+    }
+    .modal-card {
+        background: #0f1116;
+        padding: 20px;
+        border-radius: 8px;
+        width: 420px;
+        max-width: 90%;
+        text-align: center;
+        border: 1px solid #222;
+    }
+    .modal-card h3 { margin: 0 0 10px 0; }
+    .modal-actions { display:flex; gap:10px; justify-content:center; margin-top: 12px; }
+    .btn-mpv { background: #f7768e; color: black; padding:10px 16px; border-radius:6px; }
+    .btn-player { background: #2f8be6; color: white; padding:10px 16px; border-radius:6px; }
+
+    /* Player interno fullscreen */
+    .video-overlay {
+        position: fixed;
+        inset: 0;
+        background: black;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 60;
+        flex-direction: column;
+    }
+    .video-overlay video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        background: black;
+    }
+    .video-close { position: absolute; top: 12px; right: 12px; background: rgba(255,255,255,0.06); color: white; padding:8px 10px; border-radius:6px; border:none; cursor:pointer; font-family:inherit; }
+
+    /* Episode Selection Screen */
+    .episode-screen-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.95);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 100;
+        backdrop-filter: blur(2px);
+    }
+
+    .episode-screen {
+        background: linear-gradient(135deg, #0f1116 0%, #1a1b26 100%);
+        border-radius: 12px;
+        width: 90%;
+        max-width: 900px;
+        height: 90vh;
+        display: flex;
+        flex-direction: column;
+        border: 1px solid #333;
+        box-shadow: 0 8px 32px rgba(247, 118, 142, 0.1);
+    }
+
+    .episode-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 20px;
+        border-bottom: 1px solid #333;
+        background: linear-gradient(90deg, rgba(0,0,0,0.5) 0%, rgba(247,118,142,0.1) 100%);
+    }
+
+    .episode-header h2 {
+        margin: 0;
+        flex: 1;
+        text-align: center;
+        font-size: 1.5rem;
+        color: #f7768e;
+        font-weight: bold;
+    }
+
+    .close-btn {
+        background: rgba(255, 255, 255, 0.1);
+        color: white;
+        padding: 8px 16px;
+        border-radius: 6px;
+        cursor: pointer;
+        border: none;
+        font-size: 0.9rem;
+        transition: 0.2s;
+    }
+
+    .close-btn:hover {
+        background: rgba(255, 255, 255, 0.2);
+    }
+
+    .loading-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        gap: 20px;
+        color: #bbb;
+    }
+
+    .no-episodes {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        gap: 20px;
+        color: #bbb;
+        font-size: 1.1rem;
+    }
+
+    .episode-content {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        padding: 20px;
+        gap: 20px;
+    }
+
+    .season-selector {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+
+    .season-selector label {
+        font-weight: bold;
+        color: #bbb;
+        min-width: 100px;
+    }
+
+    .select-input {
+        padding: 10px 12px;
+        background: #1a1b26;
+        color: white;
+        border: 1px solid #333;
+        border-radius: 6px;
+        font-size: 1rem;
+        cursor: pointer;
+        min-width: 200px;
+    }
+
+    .select-input:hover {
+        border-color: #f7768e;
+    }
+
+    .episodes-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+        gap: 12px;
+        overflow-y: auto;
+        flex: 1;
+        padding-right: 8px;
+    }
+
+    .episodes-grid::-webkit-scrollbar {
+        width: 8px;
+    }
+
+    .episodes-grid::-webkit-scrollbar-track {
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 4px;
+    }
+
+    .episodes-grid::-webkit-scrollbar-thumb {
+        background: #f7768e;
+        border-radius: 4px;
+    }
+
+    .episode-card {
+        background: rgba(255, 255, 255, 0.05);
+        border: 2px solid transparent;
+        border-radius: 8px;
+        padding: 16px;
+        text-align: center;
+        cursor: pointer;
+        transition: all 0.2s;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        gap: 8px;
+        color: white;
+        font-family: inherit;
+    }
+
+    .episode-card:hover {
+        background: rgba(247, 118, 142, 0.15);
+        border-color: #f7768e;
+        transform: translateY(-2px);
+    }
+
+    .episode-card.selected {
+        background: rgba(247, 118, 142, 0.3);
+        border-color: #f7768e;
+        box-shadow: 0 0 12px rgba(247, 118, 142, 0.3);
+    }
+
+    .ep-number {
+        font-weight: bold;
+        font-size: 1.1rem;
+        color: #f7768e;
+    }
+
+    .ep-title {
+        font-size: 0.85rem;
+        color: #bbb;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        width: 100%;
+    }
+
+    .playback-controls {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        padding: 16px;
+        background: rgba(0, 0, 0, 0.3);
+        border-top: 1px solid #222;
+        border-radius: 6px;
+        flex-wrap: wrap;
+    }
+
+    .quality-selector {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+
+    .quality-selector label {
+        color: #bbb;
+        font-weight: bold;
+    }
+
+    .quality-loading {
+        color: #bbb;
+        font-size: 0.95rem;
+    }
+
+    .btn-play {
+        background: #f7768e;
+        color: black;
+        border: none;
+        padding: 12px 32px;
+        border-radius: 6px;
+        font-size: 1rem;
+        font-weight: bold;
+        cursor: pointer;
+        transition: all 0.2s;
+        font-family: inherit;
+    }
+
+    .btn-play:hover {
+        background: #ff8aa3;
+        transform: scale(1.05);
+    }
+
+    .btn-back {
+        background: #f7768e;
+        color: black;
+        border: none;
+        padding: 12px 32px;
+        border-radius: 6px;
+        font-size: 1rem;
+        font-weight: bold;
+        cursor: pointer;
+        transition: all 0.2s;
+        font-family: inherit;
+    }
+
+    .btn-back:hover {
+        background: #ff8aa3;
+    }
+
+    .no-selection {
+        text-align: center;
+        padding: 20px;
+        color: #888;
+        font-size: 1rem;
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: 6px;
+        border: 1px solid #333;
+    }
+
+    /* Native Player */
+    .native-player-overlay {
+        position: fixed;
+        inset: 0;
+        background: #000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 100;
+    }
+
+    .native-player-container {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        background: #000;
+    }
+
+    .player-top-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 16px 20px;
+        background: rgba(0, 0, 0, 0.8);
+        border-bottom: 1px solid #333;
+    }
+
+    .player-info h3 {
+        margin: 0 0 4px 0;
+        color: #f7768e;
+        font-size: 1.2rem;
+    }
+
+    .player-info p {
+        margin: 0;
+        color: #bbb;
+        font-size: 0.95rem;
+    }
+
+    .btn-close-player {
+        background: rgba(255, 255, 255, 0.1);
+        color: white;
+        padding: 8px 16px;
+        border-radius: 6px;
+        cursor: pointer;
+        border: none;
+        font-size: 0.9rem;
+        transition: 0.2s;
+        font-family: inherit;
+    }
+
+    .btn-close-player:hover {
+        background: rgba(255, 255, 255, 0.2);
+    }
+
+    .native-video {
+        flex: 1;
+        width: 100%;
+        height: 100%;
+        background: #000;
+    }
+
+    .player-bottom-controls {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 20px;
+        background: rgba(0, 0, 0, 0.8);
+        border-top: 1px solid #333;
+        gap: 12px;
+    }
+
+    .btn-controls {
+        background: #f7768e;
+        color: black;
+        border: none;
+        padding: 10px 20px;
+        border-radius: 6px;
+        font-size: 0.95rem;
+        font-weight: bold;
+        cursor: pointer;
+        transition: all 0.2s;
+        font-family: inherit;
+    }
+
+    .btn-controls:hover {
+        background: #ff8aa3;
+        transform: scale(1.05);
+    }
+
+    .player-info-bottom {
+        color: #bbb;
+        font-size: 0.9rem;
+    }
+
+    /* Player Choice Modal */
+    .player-choice-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.9);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 101;
+        backdrop-filter: blur(3px);
+    }
+
+    .player-choice-modal {
+        background: linear-gradient(135deg, #0f1116 0%, #1a1b26 100%);
+        border-radius: 12px;
+        padding: 32px;
+        width: 90%;
+        max-width: 500px;
+        border: 1px solid #333;
+        box-shadow: 0 8px 32px rgba(247, 118, 142, 0.2);
+        text-align: center;
+    }
+
+    .player-choice-modal h3 {
+        margin: 0 0 8px 0;
+        font-size: 1.5rem;
+        color: #f7768e;
+        font-weight: bold;
+    }
+
+    .player-choice-modal p {
+        margin: 0 0 24px 0;
+        color: #bbb;
+        font-size: 1rem;
+    }
+
+    .choice-buttons {
+        display: flex;
+        gap: 16px;
+        justify-content: center;
+        flex-wrap: wrap;
+        margin-bottom: 20px;
+    }
+
+    .choice-btn {
+        background: rgba(255, 255, 255, 0.05);
+        border: 2px solid #333;
+        border-radius: 10px;
+        padding: 20px;
+        min-width: 160px;
+        cursor: pointer;
+        transition: all 0.3s;
+        color: white;
+        font-family: inherit;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+    }
+
+    .choice-btn:hover:not(.disabled) {
+        background: rgba(255, 255, 255, 0.1);
+        border-color: #f7768e;
+        transform: translateY(-2px);
+    }
+
+    .choice-mpv {
+        border-color: #f7768e;
+        background: rgba(247, 118, 142, 0.1);
+    }
+
+    .choice-mpv:hover {
+        background: rgba(247, 118, 142, 0.2);
+        box-shadow: 0 0 16px rgba(247, 118, 142, 0.3);
+    }
+
+    .choice-native {
+        border-color: #2f8be6;
+        background: rgba(47, 139, 230, 0.1);
+    }
+
+    .choice-native:hover:not(.disabled) {
+        background: rgba(47, 139, 230, 0.2);
+        box-shadow: 0 0 16px rgba(47, 139, 230, 0.3);
+    }
+
+    .choice-native.disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        border-color: #555;
+    }
+
+    .choice-icon {
+        font-size: 2rem;
+    }
+
+    .choice-label {
+        font-weight: bold;
+        font-size: 1rem;
+    }
+
+    .choice-desc {
+        font-size: 0.85rem;
+        color: #888;
+    }
+
+    .choice-cancel {
+        background: rgba(255, 255, 255, 0.1);
+        color: white;
+        border: 1px solid #333;
+        padding: 10px 24px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.95rem;
+        font-family: inherit;
+        transition: 0.2s;
+    }
+
+    .choice-cancel:hover {
+        background: rgba(255, 255, 255, 0.15);
+    }
+</style>

@@ -1,0 +1,14 @@
+{
+  "username": "sexo",
+  "avatar": "avatar1.png",
+  "history": [],
+  "favorites": [],
+  "watch_history": null,
+  "settings": {
+    "start_fullscreen": true,
+    "content_language": "all",
+    "default_quality": "auto",
+    "use_anime4k": false
+  },
+  "mpv_path": "C:\\Users\\th\\Desktop\\goanime\\GoAnimeGUI\\bin\\mpv.exe"
+}
