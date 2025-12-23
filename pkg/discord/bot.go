@@ -430,8 +430,9 @@ func (b *DiscordBot) OAuth2CallbackServer(clientID, clientSecret, redirectURI st
 	// Servidor HTTP temporário
 	mux := http.NewServeMux()
 	server := &http.Server{
-		Addr:    port,
-		Handler: mux,
+		Addr:              port,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	fmt.Printf("[Discord OAuth] Servidor de callback iniciado na porta %s\n", port)
@@ -474,13 +475,13 @@ func (b *DiscordBot) OAuth2CallbackServer(clientID, clientSecret, redirectURI st
 	select {
 	case code := <-codeChan:
 		// Para o servidor
-		server.Close()
+		_ = server.Close()
 		return code, nil
 	case err := <-errChan:
-		server.Close()
+		_ = server.Close()
 		return "", err
 	case <-time.After(5 * time.Minute):
-		server.Close()
+		_ = server.Close()
 		return "", fmt.Errorf("timeout aguardando callback OAuth2")
 	}
 }

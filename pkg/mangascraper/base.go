@@ -80,7 +80,7 @@ func (s *baseSource) makeRequest(urlStr string) (*http.Response, error) {
 			return resp, nil
 		}
 
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
 	}
 

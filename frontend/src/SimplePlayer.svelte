@@ -6,6 +6,8 @@
     export let src = "";
     export let title = "";
     export let episodeTitle = "";
+    /** @type {string|null} Capa do anime para exibir */
+    export let animeCover = null;
     export let onClose = () => {};
     export let onNext = () => {};
     export let onPrevious = () => {};
@@ -55,6 +57,16 @@
     
     // HLS
     let hls = null;
+    
+    // Audio/Subtitle tracks
+    /** @type {{id: number, name: string, lang: string}[]} */
+    let audioTracks = [];
+    let selectedAudioTrack = -1;
+    /** @type {{id: number, name: string, lang: string}[]} */
+    let subtitleTracks = [];
+    let selectedSubtitleTrack = -1;
+    let showAudioMenu = false;
+    let showSubtitleMenu = false;
     
     // Reactive skip times debug
     $: if (skipTimes) {
@@ -112,6 +124,50 @@
         currentSkipType = null;
     }
     
+    // ===== FUNÇÕES DE ÁUDIO E LEGENDA =====
+    function selectAudioTrack(trackId) {
+        if (!hls) return;
+        console.log('[Player] Selecionando áudio:', trackId);
+        hls.audioTrack = trackId;
+        selectedAudioTrack = trackId;
+        showAudioMenu = false;
+    }
+    
+    function selectSubtitleTrack(trackId) {
+        if (!hls) return;
+        console.log('[Player] Selecionando legenda:', trackId);
+        hls.subtitleTrack = trackId;
+        selectedSubtitleTrack = trackId;
+        showSubtitleMenu = false;
+    }
+    
+    function toggleAudioMenu() {
+        showAudioMenu = !showAudioMenu;
+        showSubtitleMenu = false;
+    }
+    
+    function toggleSubtitleMenu() {
+        showSubtitleMenu = !showSubtitleMenu;
+        showAudioMenu = false;
+    }
+    
+    function getLanguageName(lang) {
+        const names = {
+            'por': 'Português',
+            'pt': 'Português',
+            'pt-BR': 'Português (BR)',
+            'pt-PT': 'Português (PT)',
+            'eng': 'English',
+            'en': 'English',
+            'jpn': 'Japonês',
+            'ja': 'Japonês',
+            'spa': 'Espanhol',
+            'es': 'Espanhol',
+            'und': 'Desconhecido'
+        };
+        return names[lang] || lang;
+    }
+    
     function initPlayer() {
         if (!src || !videoEl) return;
         
@@ -154,6 +210,29 @@
             hls.on(window['Hls'].Events.MANIFEST_PARSED, (event, data) => {
                 console.log('[HLS] Manifest parsed, levels:', data.levels.length);
                 isLoading = false;
+                
+                // Detecta tracks de áudio
+                if (hls.audioTracks && hls.audioTracks.length > 0) {
+                    audioTracks = hls.audioTracks.map((t, i) => ({
+                        id: i,
+                        name: t.name || `Áudio ${i + 1}`,
+                        lang: t.lang || 'und'
+                    }));
+                    selectedAudioTrack = hls.audioTrack;
+                    console.log('[HLS] Audio tracks:', audioTracks);
+                }
+                
+                // Detecta tracks de legenda
+                if (hls.subtitleTracks && hls.subtitleTracks.length > 0) {
+                    subtitleTracks = hls.subtitleTracks.map((t, i) => ({
+                        id: i,
+                        name: t.name || `Legenda ${i + 1}`,
+                        lang: t.lang || 'und'
+                    }));
+                    selectedSubtitleTrack = hls.subtitleTrack;
+                    console.log('[HLS] Subtitle tracks:', subtitleTracks);
+                }
+                
                 videoEl.play().catch(e => console.warn('[Player] Autoplay blocked:', e));
             });
             
@@ -499,6 +578,11 @@
                     <path d="M19 12H5M12 19l-7-7 7-7"/>
                 </svg>
             </button>
+            {#if animeCover}
+                <div class="anime-cover">
+                    <img src={animeCover} alt={title} />
+                </div>
+            {/if}
             <div class="title-info">
                 <span class="anime-title">{title || 'GoAnime Player'}</span>
                 {#if episodeTitle}
@@ -608,6 +692,9 @@
                 tabindex="0"
                 role="slider"
                 aria-label="Barra de progresso"
+                aria-valuenow={Math.round(currentTime)}
+                aria-valuemin="0"
+                aria-valuemax={Math.round(duration) || 100}
                 onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') seek(e); }}
                 onmousemove={handleProgressHover}
                 onmouseleave={handleProgressLeave}
@@ -687,7 +774,7 @@
                         {/if}
                     </button>
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
-                    <div class="volume-slider" onclick={setVolume} tabindex="0" role="slider" aria-label="Controle de volume" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') setVolume(e); }}>
+                    <div class="volume-slider" onclick={setVolume} tabindex="0" role="slider" aria-label="Controle de volume" aria-valuenow={Math.round(volume * 100)} aria-valuemin="0" aria-valuemax="100" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') setVolume(e); }}>
                         <div class="volume-track">
                             <div class="volume-fill" style="width: {isMuted ? 0 : volume * 100}%"></div>
                         </div>
@@ -703,6 +790,73 @@
             </div>
             
             <div class="controls-right">
+                <!-- Audio Track -->
+                {#if audioTracks.length > 1}
+                    <div class="track-menu-container">
+                        <button type="button" class="ctrl-btn" onclick={toggleAudioMenu} title="Áudio">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+                            </svg>
+                            <span class="track-label">Áudio</span>
+                        </button>
+                        {#if showAudioMenu}
+                            <div class="track-menu">
+                                <div class="track-menu-title">Áudio</div>
+                                {#each audioTracks as track}
+                                    <button 
+                                        type="button" 
+                                        class="track-option" 
+                                        class:active={selectedAudioTrack === track.id}
+                                        onclick={() => selectAudioTrack(track.id)}
+                                    >
+                                        <span class="track-check">{selectedAudioTrack === track.id ? '✓' : ''}</span>
+                                        <span class="track-name">{track.name}</span>
+                                        <span class="track-lang">{getLanguageName(track.lang)}</span>
+                                    </button>
+                                {/each}
+                            </div>
+                        {/if}
+                    </div>
+                {/if}
+                
+                <!-- Subtitle Track -->
+                {#if subtitleTracks.length > 0}
+                    <div class="track-menu-container">
+                        <button type="button" class="ctrl-btn" onclick={toggleSubtitleMenu} title="Legendas">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zM4 12h4v2H4v-2zm10 6H4v-2h10v2zm6 0h-4v-2h4v2zm0-4H10v-2h10v2z"/>
+                            </svg>
+                            <span class="track-label">CC</span>
+                        </button>
+                        {#if showSubtitleMenu}
+                            <div class="track-menu">
+                                <div class="track-menu-title">Legendas</div>
+                                <button 
+                                    type="button" 
+                                    class="track-option" 
+                                    class:active={selectedSubtitleTrack === -1}
+                                    onclick={() => selectSubtitleTrack(-1)}
+                                >
+                                    <span class="track-check">{selectedSubtitleTrack === -1 ? '✓' : ''}</span>
+                                    <span class="track-name">Desativado</span>
+                                </button>
+                                {#each subtitleTracks as track}
+                                    <button 
+                                        type="button" 
+                                        class="track-option" 
+                                        class:active={selectedSubtitleTrack === track.id}
+                                        onclick={() => selectSubtitleTrack(track.id)}
+                                    >
+                                        <span class="track-check">{selectedSubtitleTrack === track.id ? '✓' : ''}</span>
+                                        <span class="track-name">{track.name}</span>
+                                        <span class="track-lang">{getLanguageName(track.lang)}</span>
+                                    </button>
+                                {/each}
+                            </div>
+                        {/if}
+                    </div>
+                {/if}
+                
                 <!-- Fullscreen -->
                 <button type="button" class="ctrl-btn" onclick={toggleFullscreen} title="Tela cheia (F)">
                     {#if isFullscreen}
@@ -826,6 +980,21 @@
     .btn-back svg {
         width: 22px;
         height: 22px;
+    }
+    
+    .anime-cover {
+        width: 50px;
+        height: 70px;
+        border-radius: 6px;
+        overflow: hidden;
+        flex-shrink: 0;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+    
+    .anime-cover img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
     }
     
     .title-info {
@@ -1379,6 +1548,97 @@
     
     .time-duration {
         opacity: 0.7;
+    }
+    
+    /* ========================================
+       TRACK MENUS (AUDIO/SUBTITLE)
+       ======================================== */
+    
+    .track-menu-container {
+        position: relative;
+    }
+    
+    .track-label {
+        display: none;
+        font-size: 0.75rem;
+        margin-left: 4px;
+    }
+    
+    .track-menu {
+        position: absolute;
+        bottom: 100%;
+        right: 0;
+        background: rgba(20, 20, 20, 0.95);
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        padding: 8px 0;
+        min-width: 200px;
+        max-height: 300px;
+        overflow-y: auto;
+        margin-bottom: 8px;
+        backdrop-filter: blur(10px);
+        z-index: 1000;
+        animation: fadeInUp 0.2s ease-out;
+    }
+    
+    @keyframes fadeInUp {
+        from {
+            opacity: 0;
+            transform: translateY(10px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+    
+    .track-menu-title {
+        padding: 8px 16px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: rgba(255, 255, 255, 0.7);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        margin-bottom: 4px;
+    }
+    
+    .track-option {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        padding: 10px 16px;
+        background: none;
+        border: none;
+        color: rgba(255, 255, 255, 0.9);
+        font-size: 0.9rem;
+        cursor: pointer;
+        transition: background 0.15s ease;
+        text-align: left;
+    }
+    
+    .track-option:hover {
+        background: rgba(255, 255, 255, 0.1);
+    }
+    
+    .track-option.active {
+        background: rgba(245, 87, 108, 0.2);
+    }
+    
+    .track-check {
+        width: 20px;
+        color: #f5576c;
+        font-weight: bold;
+    }
+    
+    .track-name {
+        flex: 1;
+    }
+    
+    .track-lang {
+        font-size: 0.8rem;
+        color: rgba(255, 255, 255, 0.5);
     }
     
     /* ========================================

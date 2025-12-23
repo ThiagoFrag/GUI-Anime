@@ -1,4 +1,4 @@
-// Package api - stream.go gerencia streaming de vídeos
+﻿// Package api - stream.go gerencia streaming de videos
 package api
 
 import (
@@ -8,17 +8,17 @@ import (
 	"sync"
 	"time"
 
-	"goanime-gui/internal/cache"
-	"goanime-gui/internal/proxy"
-	"goanime-gui/pkg/smartrouter"
-	"goanime-gui/pkg/store"
-	"goanime-gui/pkg/videoextractor"
+	"GoAnimeGUI/internal/cache"
+	"GoAnimeGUI/internal/proxy"
+	"GoAnimeGUI/pkg/smartrouter"
+	"GoAnimeGUI/pkg/store"
+	"GoAnimeGUI/pkg/videoextractor"
 
 	goanime "github.com/alvarorichard/Goanime/pkg/goanime"
 	"github.com/alvarorichard/Goanime/pkg/goanime/types"
 )
 
-// StreamService gerencia operações de streaming de vídeo
+// StreamService gerencia operai§iµes de streaming de video
 type StreamService struct {
 	client        *goanime.Client
 	cache         *cache.Cache
@@ -30,14 +30,14 @@ type StreamService struct {
 	mutex         sync.RWMutex
 }
 
-// NewStreamService cria um novo serviço de streaming
+// NewStreamService cria um novo servii§o de streaming
 func NewStreamService() *StreamService {
 	return &StreamService{
 		client:        goanime.NewClient(),
 		cache:         cache.New(),
 		streamCache:   cache.NewStreamCache(),
 		sourceTracker: cache.NewSourceTracker(),
-		streamRouter:  smartrouter.New(),
+		streamRouter:  smartrouter.New(smartrouter.DefaultConfig()),
 		proxy:         proxy.New(),
 		episodesCache: make(map[string][]store.Episode),
 	}
@@ -53,7 +53,7 @@ func (s *StreamService) GetProxyPort() int {
 	return s.proxy.Port()
 }
 
-// SmartStreamResult é o resultado da busca inteligente de stream
+// SmartStreamResult i© o resultado da busca inteligente de stream
 type SmartStreamResult struct {
 	URL      string  `json:"url"`
 	Source   string  `json:"source"`
@@ -119,7 +119,7 @@ func (s *StreamService) GetSmartStreamParallel(animeTitle string, episodeNumber 
 	return smartResult, nil
 }
 
-// GetStreamURLForEpisode retorna a URL real do vídeo
+// GetStreamURLForEpisode retorna a URL real do video
 func (s *StreamService) GetStreamURLForEpisode(animeURL, episodeURL string, cachedEpisodes []store.Episode) (string, error) {
 	fmt.Printf("[GetStreamURL] AnimeURL: %s, EpisodeURL: %s\n", animeURL, episodeURL)
 
@@ -158,7 +158,7 @@ func (s *StreamService) GetStreamURLForEpisode(animeURL, episodeURL string, cach
 		}
 	}
 
-	// Encontra o episódio no cache
+	// Encontra o episi³dio no cache
 	var targetEpisode *store.Episode
 	for i := range cachedEpisodes {
 		if cachedEpisodes[i].URL == episodeURL {
@@ -168,10 +168,10 @@ func (s *StreamService) GetStreamURLForEpisode(animeURL, episodeURL string, cach
 	}
 
 	if targetEpisode == nil {
-		return "", fmt.Errorf("episódio não encontrado")
+		return "", fmt.Errorf("episi³dio nao encontrado")
 	}
 
-	// Atualiza source se especificado no episódio
+	// Atualiza source se especificado no episi³dio
 	if targetEpisode.Source != "" {
 		if parsed, err := types.ParseSource(targetEpisode.Source); err == nil {
 			primarySource = parsed
@@ -256,13 +256,13 @@ func (s *StreamService) GetStreamURLForEpisode(animeURL, episodeURL string, cach
 		select {
 		case result, ok := <-resultChan:
 			if !ok {
-				return "", fmt.Errorf("nenhuma fonte disponível: %v", lastError)
+				return "", fmt.Errorf("nenhuma fonte disponivel: %v", lastError)
 			}
 
 			if result.url != "" {
 				s.streamCache.Set(cacheKey, result.url, result.source, cache.TTLStream)
 				s.sourceTracker.RecordSuccess(result.source)
-				fmt.Printf("[GetStreamURL] ✓ Sucesso com %s!\n", result.source)
+				fmt.Printf("[GetStreamURL] âœ“ Sucesso com %s!\n", result.source)
 				return result.url, nil
 			} else if result.err != nil {
 				lastError = result.err
@@ -275,7 +275,7 @@ func (s *StreamService) GetStreamURLForEpisode(animeURL, episodeURL string, cach
 	}
 }
 
-// tryGetStream tenta obter stream de uma fonte específica
+// tryGetStream tenta obter stream de uma fonte especifica
 func (s *StreamService) tryGetStream(episode *store.Episode, animeURL, episodeURL string, source types.Source) (string, error) {
 	anime := &types.Anime{
 		Name:   episode.Title,
@@ -309,7 +309,7 @@ func (s *StreamService) tryGetStream(episode *store.Episode, animeURL, episodeUR
 	return "", fmt.Errorf("fonte %s falhou: %v", source, err)
 }
 
-// GetSourceStats retorna estatísticas das fontes
+// GetSourceStats retorna estatisticas das fontes
 func (s *StreamService) GetSourceStats() map[string]interface{} {
 	stats := s.streamRouter.GetAllStats()
 	result := make(map[string]interface{})
@@ -340,14 +340,14 @@ func (s *StreamService) ResetCircuits() {
 	s.sourceTracker.Reset()
 }
 
-// SetEpisodesCache define o cache de episódios
+// SetEpisodesCache define o cache de episi³dios
 func (s *StreamService) SetEpisodesCache(url string, episodes []store.Episode) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	s.episodesCache[url] = episodes
 }
 
-// GetEpisodesCache retorna episódios do cache
+// GetEpisodesCache retorna episi³dios do cache
 func (s *StreamService) GetEpisodesCache(url string) ([]store.Episode, bool) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
@@ -363,3 +363,5 @@ func (s *StreamService) ClearCache() {
 	s.episodesCache = make(map[string][]store.Episode)
 	s.mutex.Unlock()
 }
+
+

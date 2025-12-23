@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -51,7 +50,6 @@ type MangaClient struct {
 	baseURL    string
 	httpClient *http.Client
 	cache      map[string]interface{}
-	cacheMu    sync.RWMutex
 	cacheTTL   time.Duration
 }
 
@@ -904,49 +902,6 @@ func urlBelongsToManga(href, mangaID string) bool {
 	// Extrai o mangaID da URL do capítulo
 	urlMangaID := extractMangaID(href)
 	return urlMangaID == mangaID
-}
-
-// extractChapterNumberAndFloat extrai o número do capítulo como string e float para ordenação
-func extractChapterNumberAndFloat(href string) (string, float64) {
-	lowerHref := strings.ToLower(href)
-
-	// Padrão 1: capitulo-1167, capitulo-03-6, capitulo-200-final
-	re1 := regexp.MustCompile(`(?:capitulo|chapter|cap)-(\d+(?:[.-]\d+)?)(?:-[a-zA-Z]+)?/?$`)
-	if matches := re1.FindStringSubmatch(lowerHref); len(matches) > 1 {
-		numStr := matches[1]
-		// Substitui hífen por ponto para números decimais como "03-6" -> "03.6"
-		numStr = strings.Replace(numStr, "-", ".", 1)
-
-		numFloat, err := strconv.ParseFloat(numStr, 64)
-		if err != nil {
-			// Tenta extrair apenas o número principal
-			numOnlyRe := regexp.MustCompile(`^(\d+)`)
-			if numMatches := numOnlyRe.FindStringSubmatch(numStr); len(numMatches) > 1 {
-				numFloat, _ = strconv.ParseFloat(numMatches[1], 64)
-			}
-		}
-		return matches[1], numFloat
-	}
-
-	// Padrão 2: /1167/ ou /cap-1/ no meio da URL
-	re2 := regexp.MustCompile(`/(\d+)/?$`)
-	if matches := re2.FindStringSubmatch(lowerHref); len(matches) > 1 {
-		numFloat, _ := strconv.ParseFloat(matches[1], 64)
-		return matches[1], numFloat
-	}
-
-	return "", 0
-}
-
-// extractFloatFromText tenta extrair um número de um texto
-func extractFloatFromText(text string) float64 {
-	re := regexp.MustCompile(`(\d+(?:\.\d+)?)`)
-	matches := re.FindStringSubmatch(text)
-	if len(matches) > 1 {
-		num, _ := strconv.ParseFloat(matches[1], 64)
-		return num
-	}
-	return 0
 }
 
 // isValidMangaImage verifica se é uma imagem válida de mangá

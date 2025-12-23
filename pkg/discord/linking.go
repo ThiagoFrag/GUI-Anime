@@ -225,7 +225,7 @@ func (ls *LinkingSystem) createLocalAccount(code string) *LinkedAccount {
 
 	return &LinkedAccount{
 		UserID:      fmt.Sprintf("local_%s", codeID),
-		Username:    fmt.Sprintf("Usuário GoAnime"),
+		Username:    "Usuário GoAnime",
 		Avatar:      "",
 		LinkedAt:    time.Now(),
 		LinkCode:    code,

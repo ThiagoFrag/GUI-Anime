@@ -14,7 +14,6 @@ type WorkerPool struct {
 	workers      int
 	rateLimiter  chan struct{}
 	requestDelay time.Duration
-	mutex        sync.Mutex
 }
 
 // Task representa uma tarefa para o worker pool

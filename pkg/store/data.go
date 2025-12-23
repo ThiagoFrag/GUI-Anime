@@ -44,6 +44,14 @@ type UserSettings struct {
 	ContentLanguage string `json:"content_language"` // "all", "br", "en"
 	DefaultQuality  string `json:"default_quality"`  // "auto", "1080p", "720p", etc
 	UseAnime4K      bool   `json:"use_anime4k"`      // Usar upscaling Anime4K
+
+	// Seeding / Contribuição
+	SeedingEnabled      bool   `json:"seeding_enabled"`       // Ativar semeamento
+	SeedingMaxCPU       int    `json:"seeding_max_cpu"`       // Limite de CPU (%)
+	SeedingMaxBandwidth int    `json:"seeding_max_bandwidth"` // Limite de banda (MB/s)
+	SeedingOnlyWifi     bool   `json:"seeding_only_wifi"`     // Apenas em WiFi
+	SeedingSchedule     string `json:"seeding_schedule"`      // "always", "night", "idle"
+	SeedingContributed  int64  `json:"seeding_contributed"`   // Total contribuído (bytes)
 }
 
 // WatchedEpisode guarda informação de um episódio assistido
@@ -77,7 +85,9 @@ func LoadUser() *UserData {
 		return nil
 	}
 	var user UserData
-	json.Unmarshal(data, &user)
+	if err := json.Unmarshal(data, &user); err != nil {
+		return nil
+	}
 
 	// Inicializa settings padrão se não existir
 	if user.Settings.ContentLanguage == "" {
@@ -89,15 +99,21 @@ func LoadUser() *UserData {
 
 func SaveUser(user *UserData) error {
 	data, _ := json.MarshalIndent(user, "", "  ")
-	return os.WriteFile(dbFile, data, 0644)
+	return os.WriteFile(dbFile, data, 0600)
 }
 
 // GetDefaultSettings retorna as configurações padrão
 func GetDefaultSettings() UserSettings {
 	return UserSettings{
-		StartFullscreen: false,
-		ContentLanguage: "all",
-		DefaultQuality:  "auto",
-		UseAnime4K:      true,
+		StartFullscreen:     false,
+		ContentLanguage:     "all",
+		DefaultQuality:      "auto",
+		UseAnime4K:          true,
+		SeedingEnabled:      false,
+		SeedingMaxCPU:       30,
+		SeedingMaxBandwidth: 5,
+		SeedingOnlyWifi:     true,
+		SeedingSchedule:     "idle",
+		SeedingContributed:  0,
 	}
 }

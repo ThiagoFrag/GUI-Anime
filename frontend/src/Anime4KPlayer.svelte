@@ -40,6 +40,9 @@
     let retryCount = 0;
     const MAX_RETRIES = 2;
     let isFullscreen = false;
+
+    // Detect Google Video URLs (need special handling - no CORS)
+    $: isGoogleVideo = src && (src.includes("googlevideo.com") || src.includes("googleusercontent.com"));
     
     // Frame counter for debug logging
     let frameCounter = 0;
@@ -680,7 +683,7 @@
         <video
             bind:this={videoEl}
             src={src}
-            crossorigin="anonymous"
+            crossorigin={isGoogleVideo ? undefined : "anonymous"}
             playsinline
             autoplay
             class="player-video"

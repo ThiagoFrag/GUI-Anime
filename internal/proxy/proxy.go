@@ -128,7 +128,7 @@ func (s *Server) handleGenericProxy(w http.ResponseWriter, r *http.Request) {
 // handleHealth endpoint de health check
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
+	_, _ = w.Write([]byte("OK"))
 }
 
 // proxyRequest faz o proxy da requisição para a URL de destino
@@ -174,7 +174,7 @@ func (s *Server) proxyRequest(w http.ResponseWriter, r *http.Request, targetURL 
 	w.WriteHeader(resp.StatusCode)
 
 	// Stream do conteúdo
-	io.Copy(w, resp.Body)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // extractReferer extrai o referer base da URL

@@ -72,7 +72,7 @@ func getDefaultCacheDir() string {
 		homeDir = "."
 	}
 	cacheDir := filepath.Join(homeDir, ".mangascraper", "cache")
-	os.MkdirAll(cacheDir, 0755)
+	_ = os.MkdirAll(cacheDir, 0750)
 	return cacheDir
 }
 
@@ -267,9 +267,9 @@ func (c *Cache) saveToDisk() {
 	}
 
 	dir := filepath.Dir(c.cacheFile)
-	os.MkdirAll(dir, 0755)
+	_ = os.MkdirAll(dir, 0750)
 
-	os.WriteFile(c.cacheFile, data, 0644)
+	_ = os.WriteFile(c.cacheFile, data, 0600)
 	c.dirty = false
 }
 

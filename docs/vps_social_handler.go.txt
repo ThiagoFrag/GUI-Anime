@@ -1,0 +1,680 @@
+// =============================================================================
+// HANDLER SOCIAL PARA ADICIONAR NA VPS
+// =============================================================================
+// Adicione este código ao seu servidor existente na VPS
+// URL base: http://[2804:54:c100:2::11]:8080/social
+//
+// INSTRUÇÕES:
+// 1. Adicione as rotas ao seu router existente
+// 2. Configure o PostgreSQL com o schema social_schema.sql
+// 3. Reinicie o servidor
+// =============================================================================
+
+package main
+
+import (
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	_ "github.com/lib/pq"
+)
+
+// =============================================================================
+// CONFIGURAÇÕES
+// =============================================================================
+
+const (
+	JWTSecret        = "goanime-social-secret-2024-change-me" // MUDE ISSO!
+	TokenExpiration  = 30 * 24 * time.Hour                    // 30 dias
+	HeartbeatTimeout = 2 * time.Minute                        // Considera offline após 2 min
+)
+
+// =============================================================================
+// ESTRUTURAS
+// =============================================================================
+
+type SocialHandler struct {
+	db          *sql.DB
+	onlineUsers map[string]time.Time // userID -> lastHeartbeat
+	onlineMutex sync.RWMutex
+}
+
+type SocialUser struct {
+	UserID      string    `json:"user_id"`
+	Username    string    `json:"username"`
+	ShareCode   string    `json:"share_code"`
+	AuthToken   string    `json:"auth_token,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	IsOnline    bool      `json:"is_online"`
+	ShowStatus  bool      `json:"show_status"`
+	ShareAnimes bool      `json:"share_animes"`
+}
+
+type APIResponse struct {
+	Success bool        `json:"success"`
+	Message string      `json:"message,omitempty"`
+	Error   string      `json:"error,omitempty"`
+	Data    interface{} `json:"data,omitempty"`
+}
+
+// =============================================================================
+// INICIALIZAÇÃO
+// =============================================================================
+
+func NewSocialHandler(dbConnStr string) (*SocialHandler, error) {
+	db, err := sql.Open("postgres", dbConnStr)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := db.Ping(); err != nil {
+		return nil, err
+	}
+
+	handler := &SocialHandler{
+		db:          db,
+		onlineUsers: make(map[string]time.Time),
+	}
+
+	// Goroutine para limpar usuários inativos
+	go handler.cleanupInactiveUsers()
+
+	return handler, nil
+}
+
+// SetupRoutes configura as rotas do social no seu router existente
+func (h *SocialHandler) SetupRoutes(mux *http.ServeMux) {
+	// Health check
+	mux.HandleFunc("/social/health", h.handleHealth)
+
+	// Registro e autenticação
+	mux.HandleFunc("/social/register", h.handleRegister)
+	mux.HandleFunc("/social/profile", h.authMiddleware(h.handleProfile))
+
+	// Lookup de usuários
+	mux.HandleFunc("/social/user/lookup", h.authMiddleware(h.handleUserLookup))
+
+	// Amigos
+	mux.HandleFunc("/social/friends/add", h.authMiddleware(h.handleAddFriend))
+	mux.HandleFunc("/social/friends/remove", h.authMiddleware(h.handleRemoveFriend))
+	mux.HandleFunc("/social/friends/list", h.authMiddleware(h.handleListFriends))
+	mux.HandleFunc("/social/friends/activity", h.authMiddleware(h.handleFriendsActivity))
+
+	// Status
+	mux.HandleFunc("/social/status/update", h.authMiddleware(h.handleUpdateStatus))
+	mux.HandleFunc("/social/heartbeat", h.authMiddleware(h.handleHeartbeat))
+
+	// Recomendações
+	mux.HandleFunc("/social/recommendations", h.authMiddleware(h.handleRecommendations))
+	mux.HandleFunc("/social/trending", h.handleTrending) // Público
+
+	// Sync
+	mux.HandleFunc("/social/sync", h.authMiddleware(h.handleSync))
+
+	log.Println("[Social] Rotas configuradas em /social/*")
+}
+
+// =============================================================================
+// MIDDLEWARES
+// =============================================================================
+
+func (h *SocialHandler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Permite CORS
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Extrai token do header
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			h.sendError(w, http.StatusUnauthorized, "Token não fornecido")
+			return
+		}
+
+		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+
+		// Valida token JWT
+		token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+			return []byte(JWTSecret), nil
+		})
+
+		if err != nil || !token.Valid {
+			h.sendError(w, http.StatusUnauthorized, "Token inválido")
+			return
+		}
+
+		// Extrai userID do token
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			h.sendError(w, http.StatusUnauthorized, "Token malformado")
+			return
+		}
+
+		userID, ok := claims["user_id"].(string)
+		if !ok {
+			h.sendError(w, http.StatusUnauthorized, "UserID não encontrado no token")
+			return
+		}
+
+		// Passa userID no contexto via header (simplificado)
+		r.Header.Set("X-User-ID", userID)
+
+		next(w, r)
+	}
+}
+
+// =============================================================================
+// HANDLERS
+// =============================================================================
+
+func (h *SocialHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
+	h.sendSuccess(w, map[string]interface{}{
+		"status":  "ok",
+		"service": "goanime-social",
+		"time":    time.Now().Format(time.RFC3339),
+	})
+}
+
+func (h *SocialHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		h.sendError(w, http.StatusMethodNotAllowed, "Use POST")
+		return
+	}
+
+	var req struct {
+		Username   string `json:"username"`
+		AppVersion string `json:"app_version"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.sendError(w, http.StatusBadRequest, "JSON inválido")
+		return
+	}
+
+	if req.Username == "" || len(req.Username) < 2 {
+		h.sendError(w, http.StatusBadRequest, "Username deve ter pelo menos 2 caracteres")
+		return
+	}
+
+	// Gera IDs únicos
+	userID := generateID(16)
+	shareCode := generateShareCode()
+
+	// Gera token JWT
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"user_id":  userID,
+		"username": req.Username,
+		"exp":      time.Now().Add(TokenExpiration).Unix(),
+	})
+
+	authToken, err := token.SignedString([]byte(JWTSecret))
+	if err != nil {
+		h.sendError(w, http.StatusInternalServerError, "Erro ao gerar token")
+		return
+	}
+
+	// Insere no banco
+	_, err = h.db.Exec(`
+		INSERT INTO social_users (user_id, username, share_code, auth_token, show_status, share_animes)
+		VALUES ($1, $2, $3, $4, true, true)
+	`, userID, req.Username, shareCode, authToken)
+
+	if err != nil {
+		log.Printf("[Social] Erro ao inserir usuário: %v", err)
+		h.sendError(w, http.StatusInternalServerError, "Erro ao criar usuário")
+		return
+	}
+
+	h.sendSuccess(w, map[string]interface{}{
+		"user_id":    userID,
+		"username":   req.Username,
+		"share_code": shareCode,
+		"auth_token": authToken,
+	})
+}
+
+func (h *SocialHandler) handleProfile(w http.ResponseWriter, r *http.Request) {
+	userID := r.Header.Get("X-User-ID")
+
+	var user SocialUser
+	err := h.db.QueryRow(`
+		SELECT user_id, username, share_code, show_status, share_animes, created_at
+		FROM social_users WHERE user_id = $1
+	`, userID).Scan(&user.UserID, &user.Username, &user.ShareCode,
+		&user.ShowStatus, &user.ShareAnimes, &user.CreatedAt)
+
+	if err != nil {
+		h.sendError(w, http.StatusNotFound, "Usuário não encontrado")
+		return
+	}
+
+	user.IsOnline = h.isUserOnline(userID)
+
+	h.sendSuccess(w, user)
+}
+
+func (h *SocialHandler) handleUserLookup(w http.ResponseWriter, r *http.Request) {
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		h.sendError(w, http.StatusBadRequest, "Código não fornecido")
+		return
+	}
+
+	var user SocialUser
+	err := h.db.QueryRow(`
+		SELECT user_id, username, share_code
+		FROM social_users WHERE share_code = $1
+	`, strings.ToUpper(code)).Scan(&user.UserID, &user.Username, &user.ShareCode)
+
+	if err != nil {
+		h.sendError(w, http.StatusNotFound, "Usuário não encontrado")
+		return
+	}
+
+	user.IsOnline = h.isUserOnline(user.UserID)
+
+	h.sendSuccess(w, user)
+}
+
+func (h *SocialHandler) handleAddFriend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		h.sendError(w, http.StatusMethodNotAllowed, "Use POST")
+		return
+	}
+
+	userID := r.Header.Get("X-User-ID")
+
+	var req struct {
+		FriendID string `json:"friend_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.sendError(w, http.StatusBadRequest, "JSON inválido")
+		return
+	}
+
+	if req.FriendID == userID {
+		h.sendError(w, http.StatusBadRequest, "Você não pode adicionar a si mesmo")
+		return
+	}
+
+	// Verifica se amizade já existe
+	var exists bool
+	h.db.QueryRow(`
+		SELECT EXISTS(SELECT 1 FROM social_friendships 
+		WHERE user_id = $1 AND friend_id = $2)
+	`, userID, req.FriendID).Scan(&exists)
+
+	if exists {
+		h.sendError(w, http.StatusConflict, "Já são amigos")
+		return
+	}
+
+	// Adiciona amizade (bidirecional)
+	_, err := h.db.Exec(`
+		INSERT INTO social_friendships (user_id, friend_id) VALUES ($1, $2), ($2, $1)
+		ON CONFLICT DO NOTHING
+	`, userID, req.FriendID)
+
+	if err != nil {
+		h.sendError(w, http.StatusInternalServerError, "Erro ao adicionar amigo")
+		return
+	}
+
+	h.sendSuccess(w, map[string]string{"message": "Amigo adicionado"})
+}
+
+func (h *SocialHandler) handleRemoveFriend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" && r.Method != "DELETE" {
+		h.sendError(w, http.StatusMethodNotAllowed, "Use POST ou DELETE")
+		return
+	}
+
+	userID := r.Header.Get("X-User-ID")
+
+	var req struct {
+		FriendID string `json:"friend_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.sendError(w, http.StatusBadRequest, "JSON inválido")
+		return
+	}
+
+	// Remove amizade (bidirecional)
+	_, err := h.db.Exec(`
+		DELETE FROM social_friendships 
+		WHERE (user_id = $1 AND friend_id = $2) OR (user_id = $2 AND friend_id = $1)
+	`, userID, req.FriendID)
+
+	if err != nil {
+		h.sendError(w, http.StatusInternalServerError, "Erro ao remover amigo")
+		return
+	}
+
+	h.sendSuccess(w, map[string]string{"message": "Amigo removido"})
+}
+
+func (h *SocialHandler) handleListFriends(w http.ResponseWriter, r *http.Request) {
+	userID := r.Header.Get("X-User-ID")
+
+	rows, err := h.db.Query(`
+		SELECT u.user_id, u.username, u.share_code
+		FROM social_users u
+		INNER JOIN social_friendships f ON u.user_id = f.friend_id
+		WHERE f.user_id = $1
+	`, userID)
+
+	if err != nil {
+		h.sendError(w, http.StatusInternalServerError, "Erro ao buscar amigos")
+		return
+	}
+	defer rows.Close()
+
+	friends := []map[string]interface{}{}
+	for rows.Next() {
+		var friendID, username, shareCode string
+		rows.Scan(&friendID, &username, &shareCode)
+
+		friends = append(friends, map[string]interface{}{
+			"user_id":    friendID,
+			"username":   username,
+			"share_code": shareCode,
+			"is_online":  h.isUserOnline(friendID),
+		})
+	}
+
+	h.sendSuccess(w, friends)
+}
+
+func (h *SocialHandler) handleFriendsActivity(w http.ResponseWriter, r *http.Request) {
+	userID := r.Header.Get("X-User-ID")
+
+	rows, err := h.db.Query(`
+		SELECT u.user_id, u.username, ws.anime_title, ws.episode_num, ws.updated_at
+		FROM social_users u
+		INNER JOIN social_friendships f ON u.user_id = f.friend_id
+		LEFT JOIN social_watching_status ws ON u.user_id = ws.user_id
+		WHERE f.user_id = $1 AND u.show_status = true
+		ORDER BY ws.updated_at DESC NULLS LAST
+	`, userID)
+
+	if err != nil {
+		h.sendError(w, http.StatusInternalServerError, "Erro ao buscar atividade")
+		return
+	}
+	defer rows.Close()
+
+	activities := []map[string]interface{}{}
+	for rows.Next() {
+		var friendID, username string
+		var animeTitle sql.NullString
+		var episodeNum sql.NullInt64
+		var updatedAt sql.NullTime
+
+		rows.Scan(&friendID, &username, &animeTitle, &episodeNum, &updatedAt)
+
+		activity := map[string]interface{}{
+			"user_id":   friendID,
+			"username":  username,
+			"is_online": h.isUserOnline(friendID),
+		}
+
+		if animeTitle.Valid {
+			activity["current_anime"] = animeTitle.String
+			activity["current_ep"] = episodeNum.Int64
+		}
+
+		activities = append(activities, activity)
+	}
+
+	h.sendSuccess(w, activities)
+}
+
+func (h *SocialHandler) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		h.sendError(w, http.StatusMethodNotAllowed, "Use POST")
+		return
+	}
+
+	userID := r.Header.Get("X-User-ID")
+
+	var req struct {
+		AnimeTitle string `json:"anime_title"`
+		AnimeImage string `json:"anime_image"`
+		EpisodeNum int    `json:"episode_num"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.sendError(w, http.StatusBadRequest, "JSON inválido")
+		return
+	}
+
+	// Upsert watching status
+	_, err := h.db.Exec(`
+		INSERT INTO social_watching_status (user_id, anime_title, anime_image, episode_num)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (user_id) DO UPDATE SET
+			anime_title = $2, anime_image = $3, episode_num = $4, updated_at = NOW()
+	`, userID, req.AnimeTitle, req.AnimeImage, req.EpisodeNum)
+
+	if err != nil {
+		h.sendError(w, http.StatusInternalServerError, "Erro ao atualizar status")
+		return
+	}
+
+	h.sendSuccess(w, map[string]string{"message": "Status atualizado"})
+}
+
+func (h *SocialHandler) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	userID := r.Header.Get("X-User-ID")
+
+	h.onlineMutex.Lock()
+	h.onlineUsers[userID] = time.Now()
+	h.onlineMutex.Unlock()
+
+	h.sendSuccess(w, map[string]interface{}{
+		"status":    "online",
+		"timestamp": time.Now().Unix(),
+	})
+}
+
+func (h *SocialHandler) handleRecommendations(w http.ResponseWriter, r *http.Request) {
+	// Por agora retorna recomendações estáticas
+	// Você pode implementar ML/collaborative filtering depois
+	recs := []map[string]interface{}{
+		{
+			"anime_id":       "solo-leveling",
+			"title":          "Solo Leveling",
+			"image":          "https://cdn.myanimelist.net/images/anime/1376/121828.jpg",
+			"rating":         8.8,
+			"watch_count":    15000,
+			"trending":       true,
+			"recommended_by": "Popular na comunidade GoAnime",
+		},
+		{
+			"anime_id":       "demon-slayer-s4",
+			"title":          "Demon Slayer: Hashira Training",
+			"image":          "https://cdn.myanimelist.net/images/anime/1286/99889.jpg",
+			"rating":         8.5,
+			"watch_count":    12000,
+			"trending":       true,
+			"recommended_by": "Continuando popular",
+		},
+		{
+			"anime_id":       "jujutsu-kaisen-s2",
+			"title":          "Jujutsu Kaisen Season 2",
+			"image":          "https://cdn.myanimelist.net/images/anime/1171/109222.jpg",
+			"rating":         8.9,
+			"watch_count":    20000,
+			"trending":       true,
+			"recommended_by": "Melhor avaliado",
+		},
+	}
+
+	h.sendSuccess(w, recs)
+}
+
+func (h *SocialHandler) handleTrending(w http.ResponseWriter, r *http.Request) {
+	// Retorna trending público (sem autenticação)
+	trending := []map[string]interface{}{
+		{"anime_id": "solo-leveling", "title": "Solo Leveling", "watchers": 523},
+		{"anime_id": "demon-slayer", "title": "Demon Slayer", "watchers": 412},
+		{"anime_id": "one-piece", "title": "One Piece", "watchers": 389},
+	}
+
+	h.sendSuccess(w, trending)
+}
+
+func (h *SocialHandler) handleSync(w http.ResponseWriter, r *http.Request) {
+	userID := r.Header.Get("X-User-ID")
+
+	// Busca dados do usuário para sincronizar
+	var user SocialUser
+	h.db.QueryRow(`
+		SELECT user_id, username, share_code, show_status, share_animes
+		FROM social_users WHERE user_id = $1
+	`, userID).Scan(&user.UserID, &user.Username, &user.ShareCode,
+		&user.ShowStatus, &user.ShareAnimes)
+
+	// Busca lista de amigos
+	rows, _ := h.db.Query(`
+		SELECT u.user_id, u.username, u.share_code
+		FROM social_users u
+		INNER JOIN social_friendships f ON u.user_id = f.friend_id
+		WHERE f.user_id = $1
+	`, userID)
+
+	friends := []map[string]interface{}{}
+	if rows != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var fID, fName, fCode string
+			rows.Scan(&fID, &fName, &fCode)
+			friends = append(friends, map[string]interface{}{
+				"user_id":    fID,
+				"username":   fName,
+				"share_code": fCode,
+				"is_online":  h.isUserOnline(fID),
+			})
+		}
+	}
+
+	h.sendSuccess(w, map[string]interface{}{
+		"profile": user,
+		"friends": friends,
+	})
+}
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+func (h *SocialHandler) sendSuccess(w http.ResponseWriter, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(APIResponse{
+		Success: true,
+		Data:    data,
+	})
+}
+
+func (h *SocialHandler) sendError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(APIResponse{
+		Success: false,
+		Error:   message,
+	})
+}
+
+func (h *SocialHandler) isUserOnline(userID string) bool {
+	h.onlineMutex.RLock()
+	defer h.onlineMutex.RUnlock()
+
+	lastSeen, exists := h.onlineUsers[userID]
+	if !exists {
+		return false
+	}
+
+	return time.Since(lastSeen) < HeartbeatTimeout
+}
+
+func (h *SocialHandler) cleanupInactiveUsers() {
+	ticker := time.NewTicker(1 * time.Minute)
+	for range ticker.C {
+		h.onlineMutex.Lock()
+		for userID, lastSeen := range h.onlineUsers {
+			if time.Since(lastSeen) > HeartbeatTimeout {
+				delete(h.onlineUsers, userID)
+			}
+		}
+		h.onlineMutex.Unlock()
+	}
+}
+
+func generateID(length int) string {
+	b := make([]byte, length)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func generateShareCode() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return strings.ToUpper(fmt.Sprintf("%X", b))
+}
+
+// =============================================================================
+// SCHEMA SQL (Execute antes de iniciar)
+// =============================================================================
+/*
+-- Tabela de usuários
+CREATE TABLE IF NOT EXISTS social_users (
+    user_id VARCHAR(64) PRIMARY KEY,
+    username VARCHAR(50) NOT NULL,
+    share_code VARCHAR(8) UNIQUE NOT NULL,
+    auth_token TEXT,
+    show_status BOOLEAN DEFAULT true,
+    share_animes BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Tabela de amizades
+CREATE TABLE IF NOT EXISTS social_friendships (
+    user_id VARCHAR(64) NOT NULL,
+    friend_id VARCHAR(64) NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (user_id, friend_id),
+    FOREIGN KEY (user_id) REFERENCES social_users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (friend_id) REFERENCES social_users(user_id) ON DELETE CASCADE
+);
+
+-- Tabela de status de visualização
+CREATE TABLE IF NOT EXISTS social_watching_status (
+    user_id VARCHAR(64) PRIMARY KEY,
+    anime_title VARCHAR(255),
+    anime_image TEXT,
+    episode_num INT,
+    updated_at TIMESTAMP DEFAULT NOW(),
+    FOREIGN KEY (user_id) REFERENCES social_users(user_id) ON DELETE CASCADE
+);
+
+-- Índices
+CREATE INDEX IF NOT EXISTS idx_share_code ON social_users(share_code);
+CREATE INDEX IF NOT EXISTS idx_friendships_user ON social_friendships(user_id);
+CREATE INDEX IF NOT EXISTS idx_friendships_friend ON social_friendships(friend_id);
+*/

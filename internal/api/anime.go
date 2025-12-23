@@ -1,4 +1,4 @@
-// Package api fornece handlers de API para o frontend
+﻿// Package api fornece handlers de API para o frontend
 package api
 
 import (
@@ -8,10 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"goanime-gui/internal/cache"
-	"goanime-gui/internal/utils"
-	"goanime-gui/pkg/jikan"
-	"goanime-gui/pkg/store"
+	"GoAnimeGUI/internal/cache"
+	"GoAnimeGUI/internal/utils"
+	"GoAnimeGUI/pkg/anitube"
+	"GoAnimeGUI/pkg/jikan"
+	"GoAnimeGUI/pkg/store"
 
 	goanime "github.com/alvarorichard/Goanime/pkg/goanime"
 	"github.com/alvarorichard/Goanime/pkg/goanime/types"
@@ -19,24 +20,28 @@ import (
 
 // AnimeService gerencia operações relacionadas a animes
 type AnimeService struct {
-	client       *goanime.Client
-	cache        *cache.Cache
-	episodeCache map[string][]store.Episode
-	urlCache     map[string]string
-	mutex        sync.RWMutex
+	client           *goanime.Client
+	anitubeClient    *anitube.Client
+	animesflixClient *AnimesFlixClient
+	cache            *cache.Cache
+	episodeCache     map[string][]store.Episode
+	urlCache         map[string]string
+	mutex            sync.RWMutex
 }
 
 // NewAnimeService cria um novo serviço de anime
 func NewAnimeService() *AnimeService {
 	return &AnimeService{
-		client:       goanime.NewClient(),
-		cache:        cache.New(),
-		episodeCache: make(map[string][]store.Episode),
-		urlCache:     make(map[string]string),
+		client:           goanime.NewClient(),
+		anitubeClient:    anitube.NewClient(),
+		animesflixClient: NewAnimesFlixClient(),
+		cache:            cache.New(),
+		episodeCache:     make(map[string][]store.Episode),
+		urlCache:         make(map[string]string),
 	}
 }
 
-// Search busca animes em múltiplas fontes
+// Search busca animes em múltiplas fontes (4 fontes)
 func (s *AnimeService) Search(termo string) ([]store.SavedAnime, error) {
 	termoLower := strings.TrimSpace(strings.ToLower(termo))
 	if termoLower == "" {
@@ -50,35 +55,91 @@ func (s *AnimeService) Search(termo string) ([]store.SavedAnime, error) {
 		return cached.([]store.SavedAnime), nil
 	}
 
-	// Busca em paralelo nas duas fontes
+	// Busca em paralelo nas fontes
 	type searchResult struct {
 		animes []*types.Anime
 		source string
+		lang   string
 		err    error
 	}
 
-	resultChan := make(chan searchResult, 2)
+	// Verifica APIs disponíveis
+	anitubeAvailable := s.anitubeClient.IsAvailable()
+	animesflixAvailable := s.animesflixClient.IsAvailable()
+	numSources := 2 // AllAnime + AnimeFire
+	if anitubeAvailable {
+		numSources++
+	}
+	if animesflixAvailable {
+		numSources++
+	}
+	fmt.Printf("[Search] Buscando em %d fontes (Anitube:%v, AnimeFlix:%v)\n", numSources, anitubeAvailable, animesflixAvailable)
+	resultChan := make(chan searchResult, numSources)
 
 	// AllAnime (inglês)
 	go func() {
 		srcAllAnime := types.SourceAllAnime
 		animes, err := s.client.SearchAnime(termo, &srcAllAnime)
-		resultChan <- searchResult{animes, "AllAnime", err}
+		resultChan <- searchResult{animes, "AllAnime", "en", err}
 	}()
 
 	// AnimeFire (português)
 	go func() {
 		srcAnimeFire := types.SourceAnimeFire
 		animes, err := s.client.SearchAnime(termo, &srcAnimeFire)
-		resultChan <- searchResult{animes, "AnimeFire", err}
+		resultChan <- searchResult{animes, "AnimeFire", "pt-BR", err}
 	}()
+
+	// Anitube (português via scraper embutido)
+	if anitubeAvailable {
+		go func() {
+			results, err := s.anitubeClient.Search(termo)
+			if err != nil {
+				resultChan <- searchResult{nil, "Anitube", "pt-BR", err}
+				return
+			}
+
+			// Converte para types.Anime
+			animes := make([]*types.Anime, len(results))
+			for i, r := range results {
+				animes[i] = &types.Anime{
+					Name:     r.Title,
+					URL:      r.URL,
+					ImageURL: r.Image,
+				}
+			}
+			resultChan <- searchResult{animes, "Anitube", "pt-BR", nil}
+		}()
+	}
+
+	// AnimeFlix (português via API local - ~2400 animes)
+	if animesflixAvailable {
+		go func() {
+			results, err := s.animesflixClient.Search(termo)
+			if err != nil {
+				resultChan <- searchResult{nil, "AnimeFlix", "pt-BR", err}
+				return
+			}
+
+			// Converte para types.Anime
+			animes := make([]*types.Anime, len(results))
+			for i, r := range results {
+				animes[i] = &types.Anime{
+					Name:     r.Title,
+					URL:      r.URL,
+					ImageURL: r.Cover,
+				}
+			}
+			resultChan <- searchResult{animes, "AnimeFlix", "pt-BR", nil}
+		}()
+	}
 
 	// Coleta resultados com timeout
 	animeMap := make(map[string]*store.SavedAnime)
-	timeout := time.After(4 * time.Second)
+	timeout := time.After(8 * time.Second)
 	received := 0
 
-	for received < 2 {
+	for received < numSources {
 		select {
 		case res := <-resultChan:
 			received++
@@ -87,11 +148,6 @@ func (s *AnimeService) Search(termo string) ([]store.SavedAnime, error) {
 				continue
 			}
 			fmt.Printf("[Search] %s: %d resultados\n", res.source, len(res.animes))
-
-			lang := "en"
-			if res.source == "AnimeFire" {
-				lang = "pt-BR"
-			}
 
 			for _, anime := range res.animes {
 				if anime == nil {
@@ -105,7 +161,7 @@ func (s *AnimeService) Search(termo string) ([]store.SavedAnime, error) {
 				if existing, ok := animeMap[normalized]; ok {
 					existing.Sources = append(existing.Sources, store.AnimeSource{
 						Name:     res.source,
-						Language: lang,
+						Language: res.lang,
 						URL:      anime.URL,
 					})
 					if existing.Image == "" && anime.ImageURL != "" {
@@ -118,7 +174,7 @@ func (s *AnimeService) Search(termo string) ([]store.SavedAnime, error) {
 						URL:   anime.URL,
 						Sources: []store.AnimeSource{{
 							Name:     res.source,
-							Language: lang,
+							Language: res.lang,
 							URL:      anime.URL,
 						}},
 					}
@@ -126,7 +182,7 @@ func (s *AnimeService) Search(termo string) ([]store.SavedAnime, error) {
 			}
 		case <-timeout:
 			fmt.Println("[Search] Timeout - usando resultados parciais")
-			received = 2
+			received = numSources
 		}
 	}
 
@@ -136,7 +192,7 @@ func (s *AnimeService) Search(termo string) ([]store.SavedAnime, error) {
 		final = append(final, *anime)
 	}
 
-	// Ordena por número de fontes
+	// Ordena por número de fontes (mais fontes primeiro)
 	sort.Slice(final, func(i, j int) bool {
 		return len(final[i].Sources) > len(final[j].Sources)
 	})
@@ -147,7 +203,7 @@ func (s *AnimeService) Search(termo string) ([]store.SavedAnime, error) {
 	// Salva no cache
 	s.cache.Set(cacheKey, final, cache.TTLSearch)
 
-	fmt.Printf("[Search] Total: %d animes\n", len(final))
+	fmt.Printf("[Search] Total: %d animes de %d fontes\n", len(final), numSources)
 	return final, nil
 }
 
@@ -174,7 +230,7 @@ func (s *AnimeService) SearchMulti(termos []string) ([]store.SavedAnime, error) 
 		}(termo)
 	}
 
-	timeout := time.After(8 * time.Second)
+	timeout := time.After(10 * time.Second)
 	seenTitles := make(map[string]bool)
 	allResults := make([]store.SavedAnime, 0)
 	received := 0
@@ -216,6 +272,16 @@ func (s *AnimeService) GetEpisodes(seriesURL string) ([]store.Episode, error) {
 	}
 	s.mutex.RUnlock()
 
+	// Verifica se é URL do Anitube
+	if strings.Contains(seriesURL, "anitube") {
+		return s.getAnitubeEpisodes(seriesURL)
+	}
+
+	// Verifica se é URL do AnimeFlix
+	if strings.Contains(seriesURL, "animesflix") {
+		return s.getAnimesFlixEpisodes(seriesURL)
+	}
+
 	// Busca em todas as fontes em paralelo
 	sources := s.client.GetAvailableSources()
 	type epResult struct {
@@ -233,7 +299,7 @@ func (s *AnimeService) GetEpisodes(seriesURL string) ([]store.Episode, error) {
 		}(src)
 	}
 
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(8 * time.Second)
 	var bestEpisodes []store.Episode
 	received := 0
 
@@ -262,6 +328,67 @@ func (s *AnimeService) GetEpisodes(seriesURL string) ([]store.Episode, error) {
 	}
 
 	return nil, fmt.Errorf("nenhum episódio encontrado")
+}
+
+// getAnitubeEpisodes busca episódios diretamente do Anitube
+func (s *AnimeService) getAnitubeEpisodes(seriesURL string) ([]store.Episode, error) {
+	// Extrai ID da URL
+	id := extractAnitubeID(seriesURL)
+	if id == "" {
+		return nil, fmt.Errorf("ID do anime não encontrado na URL")
+	}
+
+	details, err := s.anitubeClient.GetAnimeDetails(id)
+	if err != nil {
+		return nil, err
+	}
+
+	var episodes []store.Episode
+	for _, ep := range details.Episodes {
+		num := 0
+		_, _ = fmt.Sscanf(ep.Number, "%d", &num)
+		episodes = append(episodes, store.Episode{
+			Title:  ep.Title,
+			URL:    ep.URL,
+			Season: 1,
+			Number: num,
+			Source: "Anitube",
+		})
+	}
+
+	if len(episodes) > 0 {
+		s.mutex.Lock()
+		s.episodeCache[seriesURL] = episodes
+		s.mutex.Unlock()
+	}
+
+	fmt.Printf("[GetEpisodes] Anitube: %d episódios\n", len(episodes))
+	return episodes, nil
+}
+
+// getAnimesFlixEpisodes busca episódios do AnimeFlix
+func (s *AnimeService) getAnimesFlixEpisodes(seriesURL string) ([]store.Episode, error) {
+	// Extrai ID da URL
+	id := extractAnimesFlixID(seriesURL)
+	if id == "" {
+		return nil, fmt.Errorf("ID do anime não encontrado na URL")
+	}
+
+	details, err := s.animesflixClient.GetAnimeDetails(id)
+	if err != nil {
+		return nil, err
+	}
+
+	episodes := details.ToEpisodes()
+
+	if len(episodes) > 0 {
+		s.mutex.Lock()
+		s.episodeCache[seriesURL] = episodes
+		s.mutex.Unlock()
+	}
+
+	fmt.Printf("[GetEpisodes] AnimeFlix: %d episódios\n", len(episodes))
+	return episodes, nil
 }
 
 // GetAnimeURL busca a URL de um anime pelo título
@@ -379,7 +506,37 @@ func (s *AnimeService) enrichWithImages(animes []store.SavedAnime) {
 
 	select {
 	case <-done:
-	case <-time.After(2500 * time.Millisecond):
+	case <-time.After(3 * time.Second):
 		fmt.Println("[enrichWithImages] Timeout na busca de imagens")
 	}
+}
+
+// GetAnitubeClient retorna o cliente Anitube para uso externo
+func (s *AnimeService) GetAnitubeClient() *anitube.Client {
+	return s.anitubeClient
+}
+
+// GetAnimesFlixClient retorna o cliente AnimeFlix para uso externo
+func (s *AnimeService) GetAnimesFlixClient() *AnimesFlixClient {
+	return s.animesflixClient
+}
+
+// Helpers para extrair IDs das URLs
+func extractAnitubeID(url string) string {
+	// Formato: https://www.anitube.news/video/12345/
+	parts := strings.Split(url, "/video/")
+	if len(parts) > 1 {
+		id := strings.TrimSuffix(parts[1], "/")
+		return strings.Split(id, "/")[0]
+	}
+	return ""
+}
+
+func extractAnimesFlixID(url string) string {
+	// Formato: https://animesflix.net/anime/slug-do-anime
+	parts := strings.Split(url, "/anime/")
+	if len(parts) > 1 {
+		return strings.Split(parts[1], "/")[0]
+	}
+	return ""
 }

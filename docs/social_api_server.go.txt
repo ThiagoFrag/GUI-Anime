@@ -1,0 +1,798 @@
+package main
+
+import (
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/gorilla/mux"
+	_ "github.com/lib/pq"
+)
+
+// ============================================
+// CONFIGURAÇÕES
+// ============================================
+
+const (
+	// Configurações do PostgreSQL
+	DBHost     = "localhost"
+	DBPort     = 5432
+	DBUser     = "goanime"
+	DBPassword = "sua_senha_segura"
+	DBName     = "goanime_social"
+
+	// JWT Secret (use uma chave forte em produção!)
+	JWTSecret = "sua_chave_jwt_super_secreta_aqui"
+
+	// Porta da API
+	APIPort = ":8080"
+)
+
+// ============================================
+// ESTRUTURAS
+// ============================================
+
+type User struct {
+	ID           string    `json:"id"`
+	UserID       string    `json:"user_id"`
+	Username     string    `json:"username"`
+	ShareCode    string    `json:"share_code"`
+	AvatarURL    string    `json:"avatar_url,omitempty"`
+	AuthToken    string    `json:"auth_token,omitempty"`
+	ShowStatus   bool      `json:"show_status"`
+	ShareAnimes  bool      `json:"share_animes"`
+	TotalWatched int       `json:"total_watched"`
+	IsOnline     bool      `json:"is_online"`
+	LastSeen     time.Time `json:"last_seen"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type Friend struct {
+	UserID       string    `json:"user_id"`
+	Username     string    `json:"username"`
+	Avatar       string    `json:"avatar,omitempty"`
+	IsOnline     bool      `json:"is_online"`
+	LastSeen     time.Time `json:"last_seen"`
+	CurrentAnime string    `json:"current_anime,omitempty"`
+	CurrentEp    int       `json:"current_ep,omitempty"`
+}
+
+type FriendActivity struct {
+	UserID       string `json:"user_id"`
+	Username     string `json:"username"`
+	Avatar       string `json:"avatar,omitempty"`
+	AnimeTitle   string `json:"anime_title,omitempty"`
+	AnimeImage   string `json:"anime_image,omitempty"`
+	EpisodeNum   int    `json:"episode_num,omitempty"`
+	IsWatching   bool   `json:"is_watching"`
+	IsOnline     bool   `json:"is_online"`
+	LastActivity string `json:"last_activity"`
+}
+
+type WatchingStatus struct {
+	AnimeTitle    string `json:"anime_title"`
+	AnimeImage    string `json:"anime_image"`
+	EpisodeNum    int    `json:"episode_num"`
+	TotalEpisodes int    `json:"total_episodes"`
+}
+
+type APIResponse struct {
+	Success bool        `json:"success"`
+	Message string      `json:"message,omitempty"`
+	Error   string      `json:"error,omitempty"`
+	Data    interface{} `json:"data,omitempty"`
+}
+
+// ============================================
+// BANCO DE DADOS
+// ============================================
+
+var db *sql.DB
+
+func initDB() error {
+	connStr := fmt.Sprintf(
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+		DBHost, DBPort, DBUser, DBPassword, DBName,
+	)
+
+	var err error
+	db, err = sql.Open("postgres", connStr)
+	if err != nil {
+		return err
+	}
+
+	// Testa a conexão
+	if err := db.Ping(); err != nil {
+		return err
+	}
+
+	// Configura pool de conexões
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	log.Println("[DB] Conectado ao PostgreSQL com sucesso!")
+	return nil
+}
+
+// ============================================
+// UTILITÁRIOS
+// ============================================
+
+func generateUserID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func generateShareCode() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return strings.ToUpper(fmt.Sprintf("%X", b))
+}
+
+func generateJWT(userID string) (string, error) {
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"user_id": userID,
+		"exp":     time.Now().Add(365 * 24 * time.Hour).Unix(), // 1 ano
+		"iat":     time.Now().Unix(),
+	})
+
+	return token.SignedString([]byte(JWTSecret))
+}
+
+func validateJWT(tokenString string) (string, error) {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("método de assinatura inválido")
+		}
+		return []byte(JWTSecret), nil
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		return claims["user_id"].(string), nil
+	}
+
+	return "", fmt.Errorf("token inválido")
+}
+
+func respondJSON(w http.ResponseWriter, status int, response APIResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(response)
+}
+
+func formatTimeAgo(t time.Time) string {
+	if t.IsZero() {
+		return "nunca"
+	}
+
+	diff := time.Since(t)
+
+	if diff < time.Minute {
+		return "agora"
+	}
+	if diff < time.Hour {
+		mins := int(diff.Minutes())
+		return fmt.Sprintf("%d min atrás", mins)
+	}
+	if diff < 24*time.Hour {
+		hours := int(diff.Hours())
+		return fmt.Sprintf("%dh atrás", hours)
+	}
+
+	days := int(diff.Hours() / 24)
+	return fmt.Sprintf("%dd atrás", days)
+}
+
+// ============================================
+// MIDDLEWARE
+// ============================================
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			respondJSON(w, http.StatusUnauthorized, APIResponse{
+				Success: false,
+				Error:   "Token de autenticação necessário",
+			})
+			return
+		}
+
+		// Remove "Bearer " do header
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+
+		userID, err := validateJWT(tokenString)
+		if err != nil {
+			respondJSON(w, http.StatusUnauthorized, APIResponse{
+				Success: false,
+				Error:   "Token inválido ou expirado",
+			})
+			return
+		}
+
+		// Adiciona userID ao contexto (simplificado)
+		r.Header.Set("X-User-ID", userID)
+
+		next.ServeHTTP(w, r)
+	}
+}
+
+// ============================================
+// HANDLERS
+// ============================================
+
+// Health check
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Message: "API Social GoAnime está online!",
+		Data: map[string]interface{}{
+			"version":   "1.0.0",
+			"timestamp": time.Now().Unix(),
+		},
+	})
+}
+
+// Registrar novo usuário
+func registerHandler(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Username   string `json:"username"`
+		AppVersion string `json:"app_version"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "Dados inválidos",
+		})
+		return
+	}
+
+	if input.Username == "" || len(input.Username) < 3 {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "Nome de usuário deve ter pelo menos 3 caracteres",
+		})
+		return
+	}
+
+	// Gera IDs únicos
+	userID := generateUserID()
+	shareCode := generateShareCode()
+
+	// Verifica se o código já existe e gera novo se necessário
+	for {
+		var exists bool
+		err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM social_users WHERE share_code = $1)", shareCode).Scan(&exists)
+		if err != nil || !exists {
+			break
+		}
+		shareCode = generateShareCode()
+	}
+
+	// Gera token JWT
+	authToken, err := generateJWT(userID)
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   "Erro ao gerar token",
+		})
+		return
+	}
+
+	// Insere no banco
+	_, err = db.Exec(`
+		INSERT INTO social_users (user_id, username, share_code, auth_token, is_online, last_seen)
+		VALUES ($1, $2, $3, $4, true, NOW())
+	`, userID, input.Username, shareCode, authToken)
+
+	if err != nil {
+		log.Printf("[Register] Erro ao inserir usuário: %v", err)
+		respondJSON(w, http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   "Erro ao criar usuário",
+		})
+		return
+	}
+
+	log.Printf("[Register] Novo usuário criado: %s (%s)", input.Username, shareCode)
+
+	respondJSON(w, http.StatusCreated, APIResponse{
+		Success: true,
+		Data: map[string]string{
+			"user_id":    userID,
+			"username":   input.Username,
+			"share_code": shareCode,
+			"auth_token": authToken,
+		},
+	})
+}
+
+// Buscar usuário por código
+func lookupUserHandler(w http.ResponseWriter, r *http.Request) {
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "Código não fornecido",
+		})
+		return
+	}
+
+	code = strings.ToUpper(strings.TrimSpace(code))
+
+	var user User
+	err := db.QueryRow(`
+		SELECT user_id, username, avatar_url, is_online, last_seen
+		FROM social_users
+		WHERE share_code = $1
+	`, code).Scan(&user.UserID, &user.Username, &user.AvatarURL, &user.IsOnline, &user.LastSeen)
+
+	if err == sql.ErrNoRows {
+		respondJSON(w, http.StatusNotFound, APIResponse{
+			Success: false,
+			Error:   "Usuário não encontrado",
+		})
+		return
+	}
+
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   "Erro ao buscar usuário",
+		})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"user_id":   user.UserID,
+			"username":  user.Username,
+			"avatar":    user.AvatarURL,
+			"is_online": user.IsOnline,
+		},
+	})
+}
+
+// Adicionar amigo
+func addFriendHandler(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		UserID   string `json:"user_id"`
+		FriendID string `json:"friend_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "Dados inválidos",
+		})
+		return
+	}
+
+	// Insere a amizade (bidirecional)
+	_, err := db.Exec(`
+		INSERT INTO social_friendships (user_id, friend_id, status)
+		VALUES ($1, $2, 'accepted')
+		ON CONFLICT (user_id, friend_id) DO NOTHING
+	`, input.UserID, input.FriendID)
+
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   "Erro ao adicionar amigo",
+		})
+		return
+	}
+
+	// Adiciona também a relação inversa
+	db.Exec(`
+		INSERT INTO social_friendships (user_id, friend_id, status)
+		VALUES ($1, $2, 'accepted')
+		ON CONFLICT (user_id, friend_id) DO NOTHING
+	`, input.FriendID, input.UserID)
+
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Message: "Amigo adicionado com sucesso",
+	})
+}
+
+// Remover amigo
+func removeFriendHandler(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		UserID   string `json:"user_id"`
+		FriendID string `json:"friend_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "Dados inválidos",
+		})
+		return
+	}
+
+	// Remove a amizade (bidirecional)
+	db.Exec(`DELETE FROM social_friendships WHERE user_id = $1 AND friend_id = $2`, input.UserID, input.FriendID)
+	db.Exec(`DELETE FROM social_friendships WHERE user_id = $1 AND friend_id = $2`, input.FriendID, input.UserID)
+
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Message: "Amigo removido",
+	})
+}
+
+// Obter atividade dos amigos
+func friendsActivityHandler(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		UserID    string   `json:"user_id"`
+		FriendIDs []string `json:"friend_ids"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "Dados inválidos",
+		})
+		return
+	}
+
+	if len(input.FriendIDs) == 0 {
+		respondJSON(w, http.StatusOK, APIResponse{
+			Success: true,
+			Data:    []FriendActivity{},
+		})
+		return
+	}
+
+	// Busca atividade dos amigos
+	activities := make([]FriendActivity, 0)
+
+	rows, err := db.Query(`
+		SELECT 
+			u.user_id, u.username, u.avatar_url, u.is_online, u.last_seen,
+			COALESCE(ws.anime_title, ''), COALESCE(ws.anime_image, ''), COALESCE(ws.episode_num, 0)
+		FROM social_users u
+		LEFT JOIN social_watching_status ws ON u.user_id = ws.user_id
+		WHERE u.user_id = ANY($1)
+	`, input.FriendIDs)
+
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   "Erro ao buscar atividades",
+		})
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var activity FriendActivity
+		var lastSeen time.Time
+		var avatarURL sql.NullString
+
+		err := rows.Scan(
+			&activity.UserID, &activity.Username, &avatarURL,
+			&activity.IsOnline, &lastSeen,
+			&activity.AnimeTitle, &activity.AnimeImage, &activity.EpisodeNum,
+		)
+
+		if err != nil {
+			continue
+		}
+
+		if avatarURL.Valid {
+			activity.Avatar = avatarURL.String
+		}
+
+		activity.IsWatching = activity.AnimeTitle != ""
+		activity.LastActivity = formatTimeAgo(lastSeen)
+
+		activities = append(activities, activity)
+	}
+
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data:    activities,
+	})
+}
+
+// Atualizar status de visualização
+func updateStatusHandler(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		UserID        string `json:"user_id"`
+		AnimeTitle    string `json:"anime_title"`
+		AnimeImage    string `json:"anime_image"`
+		EpisodeNum    int    `json:"episode_num"`
+		TotalEpisodes int    `json:"total_episodes"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "Dados inválidos",
+		})
+		return
+	}
+
+	// Upsert do status
+	_, err := db.Exec(`
+		INSERT INTO social_watching_status (user_id, anime_title, anime_image, episode_num, total_episodes, updated_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())
+		ON CONFLICT (user_id) DO UPDATE SET
+			anime_title = $2,
+			anime_image = $3,
+			episode_num = $4,
+			total_episodes = $5,
+			updated_at = NOW()
+	`, input.UserID, input.AnimeTitle, input.AnimeImage, input.EpisodeNum, input.TotalEpisodes)
+
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   "Erro ao atualizar status",
+		})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Message: "Status atualizado",
+	})
+}
+
+// Limpar status de visualização
+func clearStatusHandler(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		UserID string `json:"user_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "Dados inválidos",
+		})
+		return
+	}
+
+	db.Exec("DELETE FROM social_watching_status WHERE user_id = $1", input.UserID)
+
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Message: "Status limpo",
+	})
+}
+
+// Heartbeat (manter online)
+func heartbeatHandler(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		UserID    string `json:"user_id"`
+		Timestamp int64  `json:"timestamp"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "Dados inválidos",
+		})
+		return
+	}
+
+	_, err := db.Exec(`
+		UPDATE social_users 
+		SET is_online = true, last_seen = NOW() 
+		WHERE user_id = $1
+	`, input.UserID)
+
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   "Erro ao atualizar heartbeat",
+		})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+	})
+}
+
+// Atualizar configurações do perfil
+func updateSettingsHandler(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		UserID      string `json:"user_id"`
+		ShowStatus  bool   `json:"show_status"`
+		ShareAnimes bool   `json:"share_animes"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "Dados inválidos",
+		})
+		return
+	}
+
+	_, err := db.Exec(`
+		UPDATE social_users 
+		SET show_status = $2, share_animes = $3, updated_at = NOW()
+		WHERE user_id = $1
+	`, input.UserID, input.ShowStatus, input.ShareAnimes)
+
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   "Erro ao atualizar configurações",
+		})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Message: "Configurações atualizadas",
+	})
+}
+
+// Regenerar código de compartilhamento
+func regenerateCodeHandler(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		UserID string `json:"user_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "Dados inválidos",
+		})
+		return
+	}
+
+	newCode := generateShareCode()
+
+	// Verifica se o código já existe
+	for {
+		var exists bool
+		err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM social_users WHERE share_code = $1)", newCode).Scan(&exists)
+		if err != nil || !exists {
+			break
+		}
+		newCode = generateShareCode()
+	}
+
+	_, err := db.Exec(`
+		UPDATE social_users 
+		SET share_code = $2, updated_at = NOW()
+		WHERE user_id = $1
+	`, input.UserID, newCode)
+
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   "Erro ao regenerar código",
+		})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]string{
+			"share_code": newCode,
+		},
+	})
+}
+
+// Deletar perfil
+func deleteProfileHandler(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		UserID string `json:"user_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "Dados inválidos",
+		})
+		return
+	}
+
+	// Deleta o usuário (cascade remove amizades e status)
+	_, err := db.Exec("DELETE FROM social_users WHERE user_id = $1", input.UserID)
+
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   "Erro ao deletar perfil",
+		})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Message: "Perfil deletado",
+	})
+}
+
+// ============================================
+// MAIN
+// ============================================
+
+func main() {
+	// Inicializa banco de dados
+	if err := initDB(); err != nil {
+		log.Fatalf("[DB] Erro ao conectar: %v", err)
+	}
+	defer db.Close()
+
+	// Cria router
+	r := mux.NewRouter()
+
+	// API v1
+	api := r.PathPrefix("/api/v1/social").Subrouter()
+
+	// Rotas públicas
+	api.HandleFunc("/health", healthHandler).Methods("GET")
+	api.HandleFunc("/register", registerHandler).Methods("POST")
+	api.HandleFunc("/user/lookup", lookupUserHandler).Methods("GET")
+
+	// Rotas autenticadas
+	api.HandleFunc("/friends/add", authMiddleware(addFriendHandler)).Methods("POST")
+	api.HandleFunc("/friends/remove", authMiddleware(removeFriendHandler)).Methods("DELETE")
+	api.HandleFunc("/friends/activity", authMiddleware(friendsActivityHandler)).Methods("POST")
+	api.HandleFunc("/friends/list", authMiddleware(friendsActivityHandler)).Methods("POST") // Reutiliza o handler
+
+	api.HandleFunc("/status/update", authMiddleware(updateStatusHandler)).Methods("POST")
+	api.HandleFunc("/status/clear", authMiddleware(clearStatusHandler)).Methods("POST")
+
+	api.HandleFunc("/heartbeat", authMiddleware(heartbeatHandler)).Methods("POST")
+
+	api.HandleFunc("/profile/settings", authMiddleware(updateSettingsHandler)).Methods("PUT")
+	api.HandleFunc("/profile/regenerate-code", authMiddleware(regenerateCodeHandler)).Methods("POST")
+	api.HandleFunc("/profile/delete", authMiddleware(deleteProfileHandler)).Methods("DELETE")
+
+	// Middleware CORS
+	handler := corsMiddleware(r)
+
+	// Inicia servidor
+	log.Printf("[API] Servidor iniciado na porta %s", APIPort)
+	log.Printf("[API] Endpoints disponíveis:")
+	log.Printf("  - GET  /api/v1/social/health")
+	log.Printf("  - POST /api/v1/social/register")
+	log.Printf("  - GET  /api/v1/social/user/lookup?code=XXXXXXXX")
+	log.Printf("  - POST /api/v1/social/friends/add")
+	log.Printf("  - POST /api/v1/social/friends/activity")
+	log.Printf("  - POST /api/v1/social/status/update")
+	log.Printf("  - POST /api/v1/social/heartbeat")
+
+	if err := http.ListenAndServe(APIPort, handler); err != nil {
+		log.Fatalf("[API] Erro ao iniciar servidor: %v", err)
+	}
+}

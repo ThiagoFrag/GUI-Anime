@@ -170,25 +170,86 @@ func tryFetchPoster(title string) string {
 	return ""
 }
 
-// normalizeTitle remove sufixos comuns para melhor matching
-func normalizeTitle(title string) string {
-	result := title
+// ExtractAnimeName extrai o nome limpo do anime de títulos de torrent
+// Ex: "[EMBER] Frieren: Beyond Journey`s End (2023) [BDRip]" -> "Frieren"
+func ExtractAnimeName(torrentTitle string) string {
+	result := torrentTitle
 
-	// Remove prefixos de fonte [AllAnime], [AnimeFire]
-	if idx := strings.Index(result, "]"); idx != -1 && strings.HasPrefix(result, "[") {
-		result = strings.TrimSpace(result[idx+1:])
+	// 1. Remove tags de grupo entre colchetes [EMBER], [SubsPlease], etc
+	for strings.Contains(result, "[") && strings.Contains(result, "]") {
+		start := strings.Index(result, "[")
+		end := strings.Index(result, "]")
+		if end > start {
+			result = result[:start] + result[end+1:]
+		} else {
+			break
+		}
+	}
+	result = strings.TrimSpace(result)
+
+	// 2. Remove padrões de episódio "S01E01", "- 01", "Episode 1"
+	episodePatterns := []string{
+		" S0", " S1", " S2", " S3", " - 0", " - 1", " - 2",
+		" Episode", " Ep ", " Ep.", " E0", " E1",
+	}
+	for _, p := range episodePatterns {
+		if idx := strings.Index(result, p); idx > 3 {
+			result = result[:idx]
+			break
+		}
 	}
 
-	// Remove sufixos de episódios (X episodes)
-	if idx := strings.Index(result, " ("); idx != -1 {
+	// 3. Remove qualidade e codec "1080p", "720p", "HEVC", "x265", etc
+	qualityPatterns := []string{
+		" 1080p", " 720p", " 480p", " 2160p", " 4K",
+		" HEVC", " x265", " x264", " AVC", " H.264", " H 264",
+		" BDRip", " BD", " WEB-DL", " WEBRip", " HDTV",
+		" AAC", " FLAC", " DDP", " Dual Audio", " Multi",
+		" NF ", " CR ", " AMZN",
+	}
+	for _, p := range qualityPatterns {
+		if idx := indexOfCI(result, p); idx > 3 {
+			result = result[:idx]
+		}
+	}
+
+	// 4. Remove ano (2023), (2024), etc
+	if idx := strings.LastIndex(result, " ("); idx > 3 {
 		result = result[:idx]
 	}
 
-	// Remove padrões comuns
+	// 5. Remove títulos alternativos após " - " ou ":" se muito longo
+	if len(result) > 30 {
+		if idx := strings.Index(result, " - "); idx > 5 {
+			result = result[:idx]
+		}
+	}
+
+	// 6. Pega apenas as primeiras palavras se ainda muito longo
+	result = strings.TrimSpace(result)
+	if len(result) > 40 {
+		words := strings.Fields(result)
+		if len(words) > 4 {
+			result = strings.Join(words[:4], " ")
+		}
+	}
+
+	return strings.TrimSpace(result)
+}
+
+// normalizeTitle remove sufixos comuns para melhor matching
+func normalizeTitle(title string) string {
+	// Primeiro tenta extrair nome de torrent
+	result := ExtractAnimeName(title)
+	if result == "" {
+		result = title
+	}
+
+	// Remove padrões comuns extras
 	patterns := []string{
 		" (TV)", " (Dub)", " (Sub)", " (Dublado)", " (Legendado)",
-		" Season", " - Season", " 2nd Season", " 3rd Season", " Final Season",
-		" Part", " - Part", " OVA", " Movie", " Special",
+		" Season", " 2nd Season", " 3rd Season", " Final Season",
+		" Part", " OVA", " Movie", " Special",
 		" Dublado", " Legendado", " todos-os-episodios",
 	}
 	for _, pattern := range patterns {
@@ -299,8 +360,8 @@ func FetchPosterMultiSource(title string) string {
 		go func() { resultChan <- "" }()
 	}
 
-	// Espera pelo primeiro resultado válido ou timeout
-	timeout := time.After(2 * time.Second)
+	// Espera pelo primeiro resultado válido ou timeout (1.5s max)
+	timeout := time.After(1500 * time.Millisecond)
 	expectedResults := 5
 	received := 0
 
@@ -451,4 +512,55 @@ func FetchPosterKitsu(title string) (string, error) {
 	}
 
 	return "", fmt.Errorf("imagem não encontrada")
+}
+
+// PosterResult resultado da busca de poster
+type PosterResult struct {
+	Title  string `json:"title"`
+	Poster string `json:"poster"`
+}
+
+// FetchPostersMultiThread busca posters para múltiplos títulos em paralelo
+// Usa worker pool para controle de concorrência (5 workers = 5x mais rápido)
+func FetchPostersMultiThread(titles []string, maxWorkers int) []PosterResult {
+	if len(titles) == 0 {
+		return nil
+	}
+
+	if maxWorkers <= 0 {
+		maxWorkers = 5 // Default 5 workers simultâneos
+	}
+
+	results := make([]PosterResult, len(titles))
+	var wg sync.WaitGroup
+
+	// Canal para distribuir trabalho
+	jobs := make(chan int, len(titles))
+
+	// Inicia workers
+	for w := 0; w < maxWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				title := titles[i]
+				poster := FetchPosterMultiSource(title)
+				results[i] = PosterResult{
+					Title:  title,
+					Poster: poster,
+				}
+			}
+		}()
+	}
+
+	// Envia trabalhos
+	for i := range titles {
+		jobs <- i
+	}
+	close(jobs)
+
+	// Aguarda todos terminarem
+	wg.Wait()
+
+	return results
 }

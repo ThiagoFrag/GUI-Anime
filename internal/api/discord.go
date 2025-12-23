@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"goanime-gui/pkg/discord"
+	"GoAnimeGUI/pkg/discord"
 )
 
 // DiscordService gerencia operações do Discord
 type DiscordService struct {
-	bot           *discord.Bot
+	bot           *discord.DiscordBot
 	linkingSystem *discord.LinkingSystem
 }
 
@@ -130,7 +130,7 @@ func (s *DiscordService) GetRecommendations() []DiscordRecommendation {
 // SendRecommendation envia uma recomendação
 func (s *DiscordService) SendRecommendation(username, animeTitle, animeImage string, animeScore float64, message string) error {
 	if !s.bot.IsConnected() {
-		return fmt.Errorf("Discord não está conectado")
+		return fmt.Errorf("discord não está conectado")
 	}
 
 	rec := discord.Recommendation{

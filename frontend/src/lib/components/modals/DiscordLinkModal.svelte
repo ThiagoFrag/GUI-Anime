@@ -3,13 +3,13 @@
      * DiscordLinkModal - Modal para vincular conta Discord
      */
     
-    /** @type {{ visible?: boolean, serverInvite?: string, loading?: boolean, error?: string, onLink?: Function, onClose?: Function }} */
+    /** @type {{ visible?: boolean, serverInvite?: string, loading?: boolean, error?: string, onLink?: (code: string) => void, onClose?: () => void }} */
     let { 
         visible = false,
         serverInvite = '',
         loading = false,
         error = '',
-        onLink = () => {},
+        onLink = (code) => {},
         onClose = () => {}
     } = $props();
     
@@ -45,10 +45,11 @@
         aria-labelledby="link-modal-title"
         tabindex="-1"
     >
-        <div class="discord-link-modal" onclick={(e) => e.stopPropagation()}>
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="discord-link-modal" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="document">
             <div class="link-modal-header">
                 <h2 id="link-modal-title">🔗 Vincular Discord</h2>
-                <button type="button" class="btn-close-modal" onclick={onClose}>✕</button>
+                <button type="button" class="btn-close-modal" onclick={() => onClose()}>✕</button>
             </div>
             
             <div class="link-modal-body">

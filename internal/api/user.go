@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"goanime-gui/pkg/store"
+	"GoAnimeGUI/pkg/store"
 )
 
 // UserService gerencia operações do usuário
@@ -40,7 +40,7 @@ func (s *UserService) CreateUser(username, avatar string) *store.UserData {
 		Settings:     store.GetDefaultSettings(),
 	}
 	s.user = newUser
-	store.SaveUser(s.user)
+	_ = store.SaveUser(s.user)
 	return s.user
 }
 
@@ -68,7 +68,7 @@ func (s *UserService) AddToFavorites(anime store.SavedAnime) bool {
 	}
 
 	s.user.Favorites = append(s.user.Favorites, anime)
-	store.SaveUser(s.user)
+	_ = store.SaveUser(s.user)
 	return true
 }
 
@@ -81,7 +81,7 @@ func (s *UserService) RemoveFromFavorites(animeURL string) bool {
 	for i, fav := range s.user.Favorites {
 		if fav.URL == animeURL {
 			s.user.Favorites = append(s.user.Favorites[:i], s.user.Favorites[i+1:]...)
-			store.SaveUser(s.user)
+			_ = store.SaveUser(s.user)
 			return true
 		}
 	}
@@ -137,7 +137,7 @@ func (s *UserService) AddToWatchHistory(episode store.WatchedEpisode) {
 		s.user.WatchHistory = s.user.WatchHistory[:50]
 	}
 
-	store.SaveUser(s.user)
+	_ = store.SaveUser(s.user)
 }
 
 // === CONFIGURAÇÕES ===
@@ -156,7 +156,7 @@ func (s *UserService) SaveSettings(settings store.UserSettings) bool {
 		return false
 	}
 	s.user.Settings = settings
-	store.SaveUser(s.user)
+	_ = store.SaveUser(s.user)
 	return true
 }
 
@@ -191,7 +191,7 @@ func (s *UserService) ImportUserData(jsonData string) error {
 	}
 
 	s.user = &userData
-	store.SaveUser(s.user)
+	_ = store.SaveUser(s.user)
 	return nil
 }
 
@@ -209,5 +209,5 @@ func (s *UserService) SetMPVPath(path string) {
 		return
 	}
 	s.user.MPVPath = path
-	store.SaveUser(s.user)
+	_ = store.SaveUser(s.user)
 }

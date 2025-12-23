@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -19,7 +18,6 @@ type MangaLivreBlogClient struct {
 	baseURL    string
 	httpClient *http.Client
 	cache      map[string]interface{}
-	cacheMu    sync.RWMutex
 	cacheTTL   time.Duration
 }
 

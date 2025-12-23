@@ -64,7 +64,7 @@ func getCacheDir() string {
 		homeDir = "."
 	}
 	cacheDir := filepath.Join(homeDir, ".goanime", "cache")
-	os.MkdirAll(cacheDir, 0755)
+	_ = os.MkdirAll(cacheDir, 0750)
 	return cacheDir
 }
 
@@ -268,7 +268,7 @@ func (c *MangaCache) saveToDisk() {
 		return
 	}
 
-	if err := os.WriteFile(c.cacheFile, data, 0644); err != nil {
+	if err := os.WriteFile(c.cacheFile, data, 0600); err != nil {
 		fmt.Printf("[MangaCache] Erro ao salvar cache: %v\n", err)
 		return
 	}

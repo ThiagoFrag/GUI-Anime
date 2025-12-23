@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -21,10 +20,12 @@ import (
 
 	"GoAnimeGUI/internal/manga"
 	"GoAnimeGUI/pkg/anilist"
+	"GoAnimeGUI/pkg/animesflix"
 	"GoAnimeGUI/pkg/aniskip"
 	"GoAnimeGUI/pkg/consumet"
 	"GoAnimeGUI/pkg/discord"
 	"GoAnimeGUI/pkg/enime"
+	"GoAnimeGUI/pkg/gofilecloud"
 	"GoAnimeGUI/pkg/jikan"
 	"GoAnimeGUI/pkg/smartrouter"
 	"GoAnimeGUI/pkg/store"
@@ -35,13 +36,13 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// CacheEntry representa uma entrada de cache com TTL e validação
+// CacheEntry representa uma entrada de cache com TTL e validaÃ§Ã£o
 type CacheEntry struct {
 	Data        interface{}
 	ExpiresAt   time.Time
-	URL         string    // URL original para validação
-	LastValidAt time.Time // Última vez que a URL foi validada
-	FailCount   int       // Número de falhas consecutivas
+	URL         string    // URL original para validaÃ§Ã£o
+	LastValidAt time.Time // Ãšltima vez que a URL foi validada
+	FailCount   int       // NÃºmero de falhas consecutivas
 	Source      string    // Fonte do stream (AnimeFire, AllAnime, etc)
 }
 
@@ -53,7 +54,7 @@ func (c *CacheEntry) IsExpired() bool {
 // NeedsValidation verifica se a URL precisa ser revalidada
 // Valida a cada 2 minutos ou se houve falhas
 func (c *CacheEntry) NeedsValidation() bool {
-	// Se expirou, precisa de novo fetch, não apenas validação
+	// Se expirou, precisa de novo fetch, nÃ£o apenas validaÃ§Ã£o
 	if c.IsExpired() {
 		return false
 	}
@@ -69,7 +70,7 @@ func (c *CacheEntry) NeedsValidation() bool {
 	return time.Since(c.LastValidAt) > validationInterval
 }
 
-// StreamCacheEntry é uma entrada de cache específica para streams com mais metadados
+// StreamCacheEntry Ã© uma entrada de cache especÃ­fica para streams com mais metadados
 type StreamCacheEntry struct {
 	URL         string
 	Source      string
@@ -81,13 +82,24 @@ type StreamCacheEntry struct {
 	IsValidated bool
 }
 
-// SourceFailure rastreia falhas de fontes específicas
+// SourceFailure rastreia falhas de fontes especÃ­ficas
 type SourceFailure struct {
 	Source     string
 	FailedAt   time.Time
 	FailCount  int
 	LastError  string
 	RetryAfter time.Time
+}
+
+// toTitleCase converte string para Title Case (substitui strings.Title deprecated)
+func toTitleCase(s string) string {
+	words := strings.Fields(s)
+	for i, word := range words {
+		if len(word) > 0 {
+			words[i] = strings.ToUpper(string(word[0])) + strings.ToLower(word[1:])
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 // PrefetchRequest representa um pedido de pré-carregamento de episódio
@@ -105,24 +117,26 @@ type StreamResult struct {
 }
 
 type App struct {
-	ctx    context.Context
-	client *goanime.Client
-	User   *store.UserData
+	ctx              context.Context
+	client           *goanime.Client
+	animesflixClient *animesflix.Client
+	gofileClient     *gofilecloud.Client
+	User             *store.UserData
 
-	// Smart Router para fontes de vídeo
+	// Smart Router para fontes de vÃ­deo
 	streamRouter *smartrouter.SmartRouter
 
 	// Cache unificado com TTL
 	cache      map[string]*CacheEntry
 	cacheMutex sync.RWMutex
 
-	// Cache específicos de alta performance (sem TTL para itens críticos)
+	// Cache especÃ­ficos de alta performance (sem TTL para itens crÃ­ticos)
 	episodesCache  map[string][]store.Episode
 	urlCache       map[string]string
 	topAnimesCache []store.SavedAnime
 	trendingCache  []*AniListAnime
 
-	// Cache inteligente de streams com validação
+	// Cache inteligente de streams com validaÃ§Ã£o
 	streamCache      map[string]*StreamCacheEntry
 	streamCacheMutex sync.RWMutex
 
@@ -130,7 +144,7 @@ type App struct {
 	sourceFailures      map[string]*SourceFailure
 	sourceFailuresMutex sync.RWMutex
 
-	// Prefetch de episódios (carrega próximos episódios em background)
+	// Prefetch de episÃ³dios (carrega prÃ³ximos episÃ³dios em background)
 	prefetchQueue  chan PrefetchRequest
 	prefetchActive map[string]bool
 	prefetchMutex  sync.RWMutex
@@ -138,22 +152,22 @@ type App struct {
 	// Cache para imagens HD do AniList
 	hdImageCache map[string]*anilist.AnimeMedia
 
-	// Proxy de vídeo para contornar CORS
+	// Proxy de vÃ­deo para contornar CORS
 	proxyServer     *http.Server
 	proxyPort       int
 	currentVideoURL string
 	proxyMutex      sync.RWMutex
 
-	// Cache de imagens de mangá para carregamento rápido
+	// Cache de imagens de mangÃ¡ para carregamento rÃ¡pido
 	imageCache      map[string][]byte
 	imageCacheMutex sync.RWMutex
 	imageClient     *http.Client
 
-	// Estado de inicialização
+	// Estado de inicializaÃ§Ã£o
 	initialized bool
 	initMutex   sync.RWMutex
 
-	// HTTP client para validação de URLs
+	// HTTP client para validaÃ§Ã£o de URLs
 	validationClient *http.Client
 
 	// Cliente de Manga com cache e worker pool
@@ -161,6 +175,9 @@ type App struct {
 	mangaCache      *manga.MangaCache
 	mangaWorkerPool *manga.WorkerPool
 	mangaAggregator *manga.MangaAggregator // Agregador de múltiplas fontes
+
+	// Seeding Worker para contribuição comunitária
+	seedingWorker *SeedingWorker
 }
 
 // Cache TTLs
@@ -168,7 +185,7 @@ const (
 	CacheTTLSearch   = 10 * time.Minute // Buscas
 	CacheTTLTrending = 30 * time.Minute // Trending
 	CacheTTLTop      = 1 * time.Hour    // Top animes
-	CacheTTLEpisodes = 1 * time.Hour    // Episódios (aumentado para não perder dados)
+	CacheTTLEpisodes = 1 * time.Hour    // EpisÃ³dios (aumentado para nÃ£o perder dados)
 	CacheTTLStream   = 10 * time.Minute // URLs de stream (aumentado)
 )
 
@@ -191,7 +208,7 @@ func NewApp() *App {
 			},
 		},
 		validationClient: &http.Client{
-			Timeout: 3 * time.Second, // Reduzido para resposta mais rápida
+			Timeout: 3 * time.Second, // Reduzido para resposta mais rÃ¡pida
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				// Permite redirecionamentos normalmente
 				if len(via) >= 10 {
@@ -207,22 +224,22 @@ func NewApp() *App {
 	// Inicializa o Smart Router com circuit breaker
 	app.streamRouter = smartrouter.New(smartrouter.Config{
 		CircuitThreshold: 3,                // 3 falhas abre o circuit
-		CircuitResetTime: 30 * time.Second, // Tenta resetar após 30s
+		CircuitResetTime: 30 * time.Second, // Tenta resetar apÃ³s 30s
 		DefaultTimeout:   5 * time.Second,
 	})
 
 	// Adiciona fontes de streaming em ordem de prioridade
-	// Prioridade 1: Enime API (mais rápida, timeout curto)
+	// Prioridade 1: Enime API (mais rÃ¡pida, timeout curto)
 	app.streamRouter.AddSource(smartrouter.StreamSource{
 		Name:     "Enime",
 		Priority: 1,
-		Timeout:  3 * time.Second, // Timeout curto para não travar
+		Timeout:  3 * time.Second, // Timeout curto para nÃ£o travar
 		Fetcher: func(ctx context.Context, title string, ep int) (string, error) {
 			return enime.FindAndGetStreamWithContext(ctx, title, ep)
 		},
 	})
 
-	// Prioridade 2: Consumet API (fallback confiável)
+	// Prioridade 2: Consumet API (fallback confiÃ¡vel)
 	app.streamRouter.AddSource(smartrouter.StreamSource{
 		Name:     "Consumet",
 		Priority: 2,
@@ -242,7 +259,7 @@ func NewApp() *App {
 	return app
 }
 
-// getCache recupera um item do cache se não expirou
+// getCache recupera um item do cache se nÃ£o expirou
 func (a *App) getCache(key string) (interface{}, bool) {
 	a.cacheMutex.RLock()
 	defer a.cacheMutex.RUnlock()
@@ -281,16 +298,16 @@ func (a *App) cleanExpiredCache() {
 	}
 }
 
-// ClearEpisodesCache limpa o cache de episódios para forçar recarga
+// ClearEpisodesCache limpa o cache de episÃ³dios para forÃ§ar recarga
 func (a *App) ClearEpisodesCache() {
 	a.cacheMutex.Lock()
 	defer a.cacheMutex.Unlock()
 
 	a.episodesCache = make(map[string][]store.Episode)
-	fmt.Println("[Cache] Cache de episódios limpo")
+	fmt.Println("[Cache] Cache de episÃ³dios limpo")
 }
 
-// ClearAllCache limpa todo o cache (útil para resolver problemas)
+// ClearAllCache limpa todo o cache (Ãºtil para resolver problemas)
 func (a *App) ClearAllCache() {
 	a.cacheMutex.Lock()
 	defer a.cacheMutex.Unlock()
@@ -299,7 +316,7 @@ func (a *App) ClearAllCache() {
 	a.episodesCache = make(map[string][]store.Episode)
 	a.urlCache = make(map[string]string)
 
-	// Limpa também o cache de streams e falhas
+	// Limpa tambÃ©m o cache de streams e falhas
 	a.streamCacheMutex.Lock()
 	a.streamCache = make(map[string]*StreamCacheEntry)
 	a.streamCacheMutex.Unlock()
@@ -311,10 +328,10 @@ func (a *App) ClearAllCache() {
 	fmt.Println("[Cache] Todo o cache foi limpo")
 }
 
-// === SISTEMA DE CACHE INTELIGENTE COM VALIDAÇÃO ===
+// === SISTEMA DE CACHE INTELIGENTE COM VALIDAÃ‡ÃƒO ===
 
-// ValidateStreamURL verifica se uma URL de stream ainda é acessível
-// Usa HEAD request para ser rápido e não consumir banda
+// ValidateStreamURL verifica se uma URL de stream ainda Ã© acessÃ­vel
+// Usa HEAD request para ser rÃ¡pido e nÃ£o consumir banda
 func (a *App) ValidateStreamURL(url string) (bool, error) {
 	if url == "" {
 		return false, fmt.Errorf("URL vazia")
@@ -322,7 +339,7 @@ func (a *App) ValidateStreamURL(url string) (bool, error) {
 
 	fmt.Printf("[ValidateURL] Verificando: %s\n", url)
 
-	// Cria request HEAD (não baixa o conteúdo, só verifica headers)
+	// Cria request HEAD (nÃ£o baixa o conteÃºdo, sÃ³ verifica headers)
 	req, err := http.NewRequest("HEAD", url, nil)
 	if err != nil {
 		return false, err
@@ -342,19 +359,19 @@ func (a *App) ValidateStreamURL(url string) (bool, error) {
 
 	resp, err := a.validationClient.Do(req)
 	if err != nil {
-		fmt.Printf("[ValidateURL] Erro na requisição: %v\n", err)
+		fmt.Printf("[ValidateURL] Erro na requisiÃ§Ã£o: %v\n", err)
 		return false, err
 	}
 	defer resp.Body.Close()
 
-	// Status 2xx ou 3xx é válido
+	// Status 2xx ou 3xx Ã© vÃ¡lido
 	isValid := resp.StatusCode >= 200 && resp.StatusCode < 400
-	fmt.Printf("[ValidateURL] Status: %d, Válido: %v\n", resp.StatusCode, isValid)
+	fmt.Printf("[ValidateURL] Status: %d, VÃ¡lido: %v\n", resp.StatusCode, isValid)
 
 	return isValid, nil
 }
 
-// GetValidatedStreamCache obtém stream do cache, validando se ainda funciona
+// GetValidatedStreamCache obtÃ©m stream do cache, validando se ainda funciona
 func (a *App) GetValidatedStreamCache(key string) (string, bool) {
 	a.streamCacheMutex.RLock()
 	entry, exists := a.streamCache[key]
@@ -374,7 +391,7 @@ func (a *App) GetValidatedStreamCache(key string) (string, bool) {
 	if !entry.IsValidated || time.Since(entry.LastValidAt) > 2*time.Minute {
 		fmt.Printf("[SmartCache] Validando URL do cache: %s\n", entry.URL)
 
-		// Valida em goroutine para não bloquear, mas retorna o cache atual
+		// Valida em goroutine para nÃ£o bloquear, mas retorna o cache atual
 		go func(e *StreamCacheEntry, k string) {
 			valid, err := a.ValidateStreamURL(e.URL)
 
@@ -389,13 +406,13 @@ func (a *App) GetValidatedStreamCache(key string) (string, bool) {
 					fmt.Printf("[SmartCache] URL validada com sucesso: %s\n", cached.URL)
 				} else {
 					cached.FailCount++
-					fmt.Printf("[SmartCache] URL inválida (falha %d): %s - %v\n", cached.FailCount, cached.URL, err)
+					fmt.Printf("[SmartCache] URL invÃ¡lida (falha %d): %s - %v\n", cached.FailCount, cached.URL, err)
 
 					// Se falhou 3 vezes, remove do cache
 					if cached.FailCount >= 3 {
 						delete(a.streamCache, k)
-						a.recordSourceFailure(cached.Source, "URL inválida após múltiplas tentativas")
-						fmt.Printf("[SmartCache] Cache removido após 3 falhas: %s\n", k)
+						a.recordSourceFailure(cached.Source, "URL invÃ¡lida apÃ³s mÃºltiplas tentativas")
+						fmt.Printf("[SmartCache] Cache removido apÃ³s 3 falhas: %s\n", k)
 					}
 				}
 			}
@@ -415,14 +432,14 @@ func (a *App) SetStreamCache(key string, url string, source string, ttl time.Dur
 		Source:      source,
 		ExpiresAt:   time.Now().Add(ttl),
 		LastValidAt: time.Now(),
-		IsValidated: true, // Assume válido no momento do cache
+		IsValidated: true, // Assume vÃ¡lido no momento do cache
 		FailCount:   0,
 	}
 
 	fmt.Printf("[SmartCache] Stream cacheado: %s -> %s (source: %s)\n", key, url, source)
 }
 
-// InvalidateStreamCache invalida uma entrada específica do cache de streams
+// InvalidateStreamCache invalida uma entrada especÃ­fica do cache de streams
 func (a *App) InvalidateStreamCache(key string) {
 	a.streamCacheMutex.Lock()
 	defer a.streamCacheMutex.Unlock()
@@ -452,7 +469,7 @@ func (a *App) recordSourceFailure(source string, reason string) {
 		}
 		failure.RetryAfter = time.Now().Add(backoffMinutes[backoffIndex])
 
-		fmt.Printf("[SourceTracker] Falha %d para %s: %s (retry após %v)\n",
+		fmt.Printf("[SourceTracker] Falha %d para %s: %s (retry apÃ³s %v)\n",
 			failure.FailCount, source, reason, backoffMinutes[backoffIndex])
 	} else {
 		a.sourceFailures[source] = &SourceFailure{
@@ -471,28 +488,28 @@ func (a *App) recordSourceSuccess(source string) {
 	a.sourceFailuresMutex.Lock()
 	defer a.sourceFailuresMutex.Unlock()
 
-	// Reseta falhas após sucesso
+	// Reseta falhas apÃ³s sucesso
 	if failure, exists := a.sourceFailures[source]; exists {
-		fmt.Printf("[SourceTracker] Fonte %s recuperada após %d falhas\n", source, failure.FailCount)
+		fmt.Printf("[SourceTracker] Fonte %s recuperada apÃ³s %d falhas\n", source, failure.FailCount)
 		delete(a.sourceFailures, source)
 	}
 }
 
-// IsSourceAvailable verifica se uma fonte está disponível (não em cooldown)
+// IsSourceAvailable verifica se uma fonte estÃ¡ disponÃ­vel (nÃ£o em cooldown)
 func (a *App) IsSourceAvailable(source string) bool {
 	a.sourceFailuresMutex.RLock()
 	defer a.sourceFailuresMutex.RUnlock()
 
 	if failure, exists := a.sourceFailures[source]; exists {
 		if time.Now().Before(failure.RetryAfter) {
-			fmt.Printf("[SourceTracker] Fonte %s em cooldown até %v\n", source, failure.RetryAfter)
+			fmt.Printf("[SourceTracker] Fonte %s em cooldown atÃ© %v\n", source, failure.RetryAfter)
 			return false
 		}
 	}
 	return true
 }
 
-// GetAlternativeSource retorna a melhor fonte alternativa disponível
+// GetAlternativeSource retorna a melhor fonte alternativa disponÃ­vel
 func (a *App) GetAlternativeSource(excludeSources ...string) string {
 	sources := []string{"AllAnime", "AnimeFire", "Enime", "Consumet"}
 
@@ -509,7 +526,7 @@ func (a *App) GetAlternativeSource(excludeSources ...string) string {
 			continue
 		}
 
-		// Verifica se a fonte está disponível
+		// Verifica se a fonte estÃ¡ disponÃ­vel
 		if failure, exists := a.sourceFailures[source]; exists {
 			if time.Now().Before(failure.RetryAfter) {
 				continue // Ainda em cooldown
@@ -520,7 +537,7 @@ func (a *App) GetAlternativeSource(excludeSources ...string) string {
 		return source
 	}
 
-	// Se todas estão em cooldown, retorna a com menor tempo de espera
+	// Se todas estÃ£o em cooldown, retorna a com menor tempo de espera
 	var bestSource string
 	var earliestRetry time.Time
 
@@ -542,7 +559,7 @@ func (a *App) GetAlternativeSource(excludeSources ...string) string {
 	return bestSource
 }
 
-// SourceStatus representa o status de uma fonte de vídeo para o frontend
+// SourceStatus representa o status de uma fonte de vÃ­deo para o frontend
 type SourceStatus struct {
 	Name        string `json:"name"`
 	IsAvailable bool   `json:"isAvailable"`
@@ -552,14 +569,14 @@ type SourceStatus struct {
 	CachedURLs  int    `json:"cachedUrls"`
 }
 
-// CacheStats representa estatísticas do cache para o frontend
+// CacheStats representa estatÃ­sticas do cache para o frontend
 type CacheStats struct {
 	Sources      []SourceStatus `json:"sources"`
 	TotalStreams int            `json:"totalStreams"`
 	TotalCache   int            `json:"totalCache"`
 }
 
-// GetCacheStats retorna estatísticas do cache e status das fontes
+// GetCacheStats retorna estatÃ­sticas do cache e status das fontes
 func (a *App) GetCacheStats() CacheStats {
 	stats := CacheStats{
 		Sources: make([]SourceStatus, 0),
@@ -609,7 +626,7 @@ func (a *App) GetCacheStats() CacheStats {
 	return stats
 }
 
-// ResetSourceFailures reseta todas as falhas de fontes (útil para debug)
+// ResetSourceFailures reseta todas as falhas de fontes (Ãºtil para debug)
 func (a *App) ResetSourceFailures() {
 	a.sourceFailuresMutex.Lock()
 	defer a.sourceFailuresMutex.Unlock()
@@ -618,10 +635,10 @@ func (a *App) ResetSourceFailures() {
 	fmt.Println("[SourceTracker] Todas as falhas foram resetadas")
 }
 
-// startVideoProxy inicia um servidor HTTP local para fazer proxy do vídeo
+// startVideoProxy inicia um servidor HTTP local para fazer proxy do vÃ­deo
 func (a *App) startVideoProxy() error {
 	if a.proxyServer != nil {
-		return nil // Já está rodando
+		return nil // JÃ¡ estÃ¡ rodando
 	}
 
 	// Encontra uma porta livre
@@ -635,7 +652,7 @@ func (a *App) startVideoProxy() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/video", a.handleVideoProxy)
 	mux.HandleFunc("/proxy/", a.handleGenericProxy)         // Para segmentos HLS
-	mux.HandleFunc("/manga-image", a.handleMangaImageProxy) // Para imagens de mangá com cache
+	mux.HandleFunc("/manga-image", a.handleMangaImageProxy) // Para imagens de mangÃ¡ com cache
 
 	a.proxyServer = &http.Server{
 		Addr:    fmt.Sprintf("127.0.0.1:%d", a.proxyPort),
@@ -656,14 +673,14 @@ func (a *App) startVideoProxy() error {
 
 // handleGenericProxy faz proxy de qualquer URL (para segmentos HLS)
 func (a *App) handleGenericProxy(w http.ResponseWriter, r *http.Request) {
-	// URL está no path: /proxy/https://...
+	// URL estÃ¡ no path: /proxy/https://...
 	targetURL := strings.TrimPrefix(r.URL.Path, "/proxy/")
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
 	}
 
 	if targetURL == "" {
-		http.Error(w, "URL não especificada", http.StatusBadRequest)
+		http.Error(w, "URL nÃ£o especificada", http.StatusBadRequest)
 		return
 	}
 
@@ -706,13 +723,13 @@ func (a *App) handleGenericProxy(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-// handleMangaImageProxy faz proxy de imagens de mangá com cache em memória
+// handleMangaImageProxy faz proxy de imagens de mangÃ¡ com cache em memÃ³ria
 func (a *App) handleMangaImageProxy(w http.ResponseWriter, r *http.Request) {
 	imageURL := r.URL.Query().Get("url")
 	referer := r.URL.Query().Get("referer")
 
 	if imageURL == "" {
-		http.Error(w, "URL não especificada", http.StatusBadRequest)
+		http.Error(w, "URL nÃ£o especificada", http.StatusBadRequest)
 		return
 	}
 
@@ -760,11 +777,11 @@ func (a *App) handleMangaImageProxy(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		http.Error(w, "Imagem não encontrada", resp.StatusCode)
+		http.Error(w, "Imagem nÃ£o encontrada", resp.StatusCode)
 		return
 	}
 
-	// Lê a imagem
+	// LÃª a imagem
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		http.Error(w, "Erro ao ler imagem", http.StatusInternalServerError)
@@ -802,14 +819,14 @@ func (a *App) handleMangaImageProxy(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// handleVideoProxy faz proxy do vídeo remoto para o cliente local
+// handleVideoProxy faz proxy do vÃ­deo remoto para o cliente local
 func (a *App) handleVideoProxy(w http.ResponseWriter, r *http.Request) {
 	a.proxyMutex.RLock()
 	videoURL := a.currentVideoURL
 	a.proxyMutex.RUnlock()
 
 	if videoURL == "" {
-		http.Error(w, "Nenhum vídeo configurado", http.StatusBadRequest)
+		http.Error(w, "Nenhum vÃ­deo configurado", http.StatusBadRequest)
 		return
 	}
 
@@ -826,7 +843,7 @@ func (a *App) handleVideoProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Copia headers da requisição original (para suportar Range requests)
+	// Copia headers da requisiÃ§Ã£o original (para suportar Range requests)
 	for key, values := range r.Header {
 		for _, value := range values {
 			if key == "Range" || key == "Accept" || key == "Accept-Encoding" {
@@ -847,7 +864,7 @@ func (a *App) handleVideoProxy(w http.ResponseWriter, r *http.Request) {
 		req.Header.Set("Referer", "https://animefire.plus/")
 		req.Header.Set("Origin", "https://animefire.plus")
 	} else if strings.Contains(videoURL, "sharepoint") || strings.Contains(videoURL, "microsoft") {
-		// SharePoint precisa de headers específicos
+		// SharePoint precisa de headers especÃ­ficos
 		req.Header.Set("Referer", "https://myanime.sharepoint.com/")
 		req.Header.Set("Origin", "https://myanime.sharepoint.com")
 		req.Header.Set("Accept", "*/*")
@@ -867,8 +884,8 @@ func (a *App) handleVideoProxy(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Printf("[VideoProxy] Erro na requisição: %v\n", err)
-		http.Error(w, "Erro ao acessar vídeo", http.StatusBadGateway)
+		fmt.Printf("[VideoProxy] Erro na requisiÃ§Ã£o: %v\n", err)
+		http.Error(w, "Erro ao acessar vÃ­deo", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
@@ -876,9 +893,9 @@ func (a *App) handleVideoProxy(w http.ResponseWriter, r *http.Request) {
 	// Verifica se a resposta foi bem sucedida
 	if resp.StatusCode >= 400 {
 		fmt.Printf("[VideoProxy] Servidor remoto retornou erro: %d %s\n", resp.StatusCode, resp.Status)
-		// Se for um erro de autenticação, tenta sem proxy
+		// Se for um erro de autenticaÃ§Ã£o, tenta sem proxy
 		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			fmt.Printf("[VideoProxy] Erro de autenticação - URL pode requerer acesso direto\n")
+			fmt.Printf("[VideoProxy] Erro de autenticaÃ§Ã£o - URL pode requerer acesso direto\n")
 		}
 	}
 
@@ -892,7 +909,7 @@ func (a *App) handleVideoProxy(w http.ResponseWriter, r *http.Request) {
 	isM3U8 := strings.Contains(videoURL, ".m3u8") || strings.Contains(resp.Header.Get("Content-Type"), "mpegurl")
 
 	if isM3U8 {
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			http.Error(w, "Erro ao ler m3u8", http.StatusInternalServerError)
 			return
@@ -908,10 +925,10 @@ func (a *App) handleVideoProxy(w http.ResponseWriter, r *http.Request) {
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
 			if line == "" || strings.HasPrefix(line, "#") {
-				// Mantém comentários e linhas vazias
+				// MantÃ©m comentÃ¡rios e linhas vazias
 				newLines = append(newLines, line)
 			} else {
-				// É uma URL de segmento
+				// Ã‰ uma URL de segmento
 				var fullURL string
 				if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
 					fullURL = line
@@ -953,9 +970,9 @@ func (a *App) handleVideoProxy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// GetProxyURLForVideo retorna a URL do proxy local para um vídeo
+// GetProxyURLForVideo retorna a URL do proxy local para um vÃ­deo
 func (a *App) GetProxyURLForVideo(videoURL string) (string, error) {
-	// Inicia o proxy se ainda não estiver rodando
+	// Inicia o proxy se ainda nÃ£o estiver rodando
 	if err := a.startVideoProxy(); err != nil {
 		return "", err
 	}
@@ -978,7 +995,7 @@ func (a *App) startup(ctx context.Context) {
 	// Inicializa Discord OAuth
 	initDiscordOAuth()
 
-	// Pré-carrega dados em background para inicialização rápida
+	// PrÃ©-carrega dados em background para inicializaÃ§Ã£o rÃ¡pida
 	go a.preloadData()
 
 	// Limpa cache expirado periodicamente
@@ -991,10 +1008,10 @@ func (a *App) startup(ctx context.Context) {
 }
 
 // preloadData carrega dados em background para melhor UX
-// Não bloqueia - carrega progressivamente e emite eventos
+// NÃ£o bloqueia - carrega progressivamente e emite eventos
 func (a *App) preloadData() {
 	// Carrega trending do AniList PRIMEIRO (prioridade alta - usado no hero)
-	// É o mais rápido, então carrega primeiro
+	// Ã‰ o mais rÃ¡pido, entÃ£o carrega primeiro
 	go func() {
 		if animes, err := a.fetchTrendingInternal(15); err == nil && len(animes) > 0 {
 			a.cacheMutex.Lock()
@@ -1005,7 +1022,7 @@ func (a *App) preloadData() {
 	}()
 
 	// Carrega top animes em background (prioridade baixa)
-	// Usa versão otimizada que não bloqueia
+	// Usa versÃ£o otimizada que nÃ£o bloqueia
 	go func() {
 		if animes, err := a.fetchTopAnimesOptimized(); err == nil && len(animes) > 0 {
 			a.cacheMutex.Lock()
@@ -1020,13 +1037,13 @@ func (a *App) preloadData() {
 	a.initialized = true
 	a.initMutex.Unlock()
 
-	fmt.Println("[startup] Pré-carregamento iniciado em background")
+	fmt.Println("[startup] PrÃ©-carregamento iniciado em background")
 }
 
 // fetchTopAnimesOptimized busca top animes de forma otimizada
-// Primeiro tenta Jikan (rápido), depois enriquece com fontes reais em background
+// Primeiro tenta Jikan (rÃ¡pido), depois enriquece com fontes reais em background
 func (a *App) fetchTopAnimesOptimized() ([]store.SavedAnime, error) {
-	// FASE 1: Busca rápida do Jikan (já tem imagens)
+	// FASE 1: Busca rÃ¡pida do Jikan (jÃ¡ tem imagens)
 	jikanAnimes, err := jikan.FetchTopAnimes()
 	if err == nil && len(jikanAnimes) > 0 {
 		result := make([]store.SavedAnime, 0, 20)
@@ -1037,11 +1054,11 @@ func (a *App) fetchTopAnimesOptimized() ([]store.SavedAnime, error) {
 			result = append(result, store.SavedAnime{
 				Title: item.Title,
 				Image: item.Image,
-				URL:   "", // Será preenchido quando o usuário clicar
+				URL:   "", // SerÃ¡ preenchido quando o usuÃ¡rio clicar
 			})
 		}
 
-		// FASE 2: Em background, busca URLs reais (não bloqueia)
+		// FASE 2: Em background, busca URLs reais (nÃ£o bloqueia)
 		go a.enrichTopAnimesWithURLs(result)
 
 		return result, nil
@@ -1057,7 +1074,7 @@ func (a *App) enrichTopAnimesWithURLs(animes []store.SavedAnime) {
 		a.client = goanime.NewClient()
 	}
 
-	sem := make(chan struct{}, 3) // Apenas 3 paralelos para não sobrecarregar
+	sem := make(chan struct{}, 3) // Apenas 3 paralelos para nÃ£o sobrecarregar
 	var wg sync.WaitGroup
 
 	for i := range animes {
@@ -1120,7 +1137,7 @@ func (a *App) ToggleFullscreen() {
 	runtime.WindowToggleMaximise(a.ctx)
 }
 
-// IsFullscreen verifica se a janela está em tela cheia
+// IsFullscreen verifica se a janela estÃ¡ em tela cheia
 func (a *App) WindowMaximise() {
 	runtime.WindowMaximise(a.ctx)
 }
@@ -1129,7 +1146,7 @@ func (a *App) WindowUnmaximise() {
 	runtime.WindowUnmaximise(a.ctx)
 }
 
-// --- FUNÇÕES EXPORTADAS ---
+// --- FUNÃ‡Ã•ES EXPORTADAS ---
 
 func (a *App) GetCurrentUser() *store.UserData {
 	return a.User
@@ -1165,10 +1182,10 @@ func (a *App) AddToFavorites(anime store.SavedAnime) bool {
 		return false
 	}
 
-	// Verifica se já existe
+	// Verifica se jÃ¡ existe
 	for _, fav := range a.User.Favorites {
 		if fav.URL == anime.URL || fav.Title == anime.Title {
-			return false // Já existe
+			return false // JÃ¡ existe
 		}
 	}
 
@@ -1193,7 +1210,7 @@ func (a *App) RemoveFromFavorites(animeURL string) bool {
 	return false
 }
 
-// IsFavorite verifica se um anime está nos favoritos
+// IsFavorite verifica se um anime estÃ¡ nos favoritos
 func (a *App) IsFavorite(animeURL string) bool {
 	if a.User == nil {
 		return false
@@ -1206,9 +1223,9 @@ func (a *App) IsFavorite(animeURL string) bool {
 	return false
 }
 
-// === HISTÓRICO DE VISUALIZAÇÃO ===
+// === HISTÃ“RICO DE VISUALIZAÃ‡ÃƒO ===
 
-// GetWatchHistory retorna os últimos episódios assistidos
+// GetWatchHistory retorna os Ãºltimos episÃ³dios assistidos
 func (a *App) GetWatchHistory() []store.WatchedEpisode {
 	if a.User == nil {
 		return []store.WatchedEpisode{}
@@ -1216,18 +1233,18 @@ func (a *App) GetWatchHistory() []store.WatchedEpisode {
 	return a.User.WatchHistory
 }
 
-// AddToWatchHistory adiciona um episódio ao histórico
+// AddToWatchHistory adiciona um episÃ³dio ao histÃ³rico
 func (a *App) AddToWatchHistory(episode store.WatchedEpisode) {
 	if a.User == nil {
 		return
 	}
 
-	// Define timestamp se não especificado
+	// Define timestamp se nÃ£o especificado
 	if episode.WatchedAt == "" {
 		episode.WatchedAt = time.Now().Format(time.RFC3339)
 	}
 
-	// Remove entrada duplicada (mesmo episódio)
+	// Remove entrada duplicada (mesmo episÃ³dio)
 	for i, e := range a.User.WatchHistory {
 		if e.EpisodeURL == episode.EpisodeURL {
 			a.User.WatchHistory = append(a.User.WatchHistory[:i], a.User.WatchHistory[i+1:]...)
@@ -1235,7 +1252,7 @@ func (a *App) AddToWatchHistory(episode store.WatchedEpisode) {
 		}
 	}
 
-	// Adiciona no início (mais recente primeiro)
+	// Adiciona no inÃ­cio (mais recente primeiro)
 	a.User.WatchHistory = append([]store.WatchedEpisode{episode}, a.User.WatchHistory...)
 
 	// Limita a 50 entradas
@@ -1246,9 +1263,9 @@ func (a *App) AddToWatchHistory(episode store.WatchedEpisode) {
 	store.SaveUser(a.User)
 }
 
-// === CONFIGURAÇÕES ===
+// === CONFIGURAÃ‡Ã•ES ===
 
-// GetSettings retorna as configurações do utilizador
+// GetSettings retorna as configuraÃ§Ãµes do utilizador
 func (a *App) GetSettings() store.UserSettings {
 	if a.User == nil {
 		return store.GetDefaultSettings()
@@ -1256,7 +1273,7 @@ func (a *App) GetSettings() store.UserSettings {
 	return a.User.Settings
 }
 
-// SaveSettings guarda as configurações do utilizador
+// SaveSettings guarda as configuraÃ§Ãµes do utilizador
 func (a *App) SaveSettings(settings store.UserSettings) bool {
 	if a.User == nil {
 		return false
@@ -1271,7 +1288,7 @@ func (a *App) SaveSettings(settings store.UserSettings) bool {
 // ExportUserData exporta todos os dados do utilizador como JSON string
 func (a *App) ExportUserData() (string, error) {
 	if a.User == nil {
-		return "", fmt.Errorf("utilizador não encontrado")
+		return "", fmt.Errorf("utilizador nÃ£o encontrado")
 	}
 
 	data, err := json.MarshalIndent(a.User, "", "  ")
@@ -1288,12 +1305,12 @@ func (a *App) ImportUserData(jsonData string) error {
 		return fmt.Errorf("erro ao processar JSON: %w", err)
 	}
 
-	// Valida dados mínimos
+	// Valida dados mÃ­nimos
 	if userData.Username == "" {
-		return fmt.Errorf("nome de utilizador inválido")
+		return fmt.Errorf("nome de utilizador invÃ¡lido")
 	}
 
-	// Garante que settings tem valores padrão se vazios
+	// Garante que settings tem valores padrÃ£o se vazios
 	if userData.Settings.ContentLanguage == "" {
 		userData.Settings.ContentLanguage = "all"
 	}
@@ -1378,12 +1395,12 @@ func (a *App) GetTrendingAnimes(limit int) ([]*AniListAnime, error) {
 		limit = 15
 	}
 
-	// Verifica cache pré-carregado primeiro (mais rápido)
+	// Verifica cache prÃ©-carregado primeiro (mais rÃ¡pido)
 	a.cacheMutex.RLock()
 	if len(a.trendingCache) > 0 {
 		cached := a.trendingCache
 		a.cacheMutex.RUnlock()
-		fmt.Println("[GetTrendingAnimes] Retornando cache pré-carregado")
+		fmt.Println("[GetTrendingAnimes] Retornando cache prÃ©-carregado")
 		if len(cached) > limit {
 			return cached[:limit], nil
 		}
@@ -1406,7 +1423,7 @@ func (a *App) GetTrendingAnimes(limit int) ([]*AniListAnime, error) {
 
 	a.setCache(cacheKey, animes, CacheTTLTrending)
 
-	// Atualiza cache pré-carregado também
+	// Atualiza cache prÃ©-carregado tambÃ©m
 	a.cacheMutex.Lock()
 	a.trendingCache = animes
 	a.cacheMutex.Unlock()
@@ -1463,7 +1480,7 @@ func (a *App) SearchAniList(query string, limit int) ([]*AniListAnime, error) {
 	return animes, nil
 }
 
-// GetAnimeHDImage busca imagem HD de um anime pelo título
+// GetAnimeHDImage busca imagem HD de um anime pelo tÃ­tulo
 func (a *App) GetAnimeHDImage(title string) (map[string]string, error) {
 	image, banner, color, err := anilist.GetHDImage(title)
 	if err != nil {
@@ -1491,7 +1508,7 @@ type ConsumetAnime struct {
 	Provider      string   `json:"provider"`
 }
 
-// ConsumetEpisode representa um episódio do Consumet
+// ConsumetEpisode representa um episÃ³dio do Consumet
 type ConsumetEpisode struct {
 	ID       string `json:"id"`
 	Number   int    `json:"number"`
@@ -1523,7 +1540,7 @@ func (a *App) SearchConsumet(query string) ([]ConsumetAnime, error) {
 	return animes, nil
 }
 
-// GetConsumetEpisodes busca episódios de um anime via Consumet
+// GetConsumetEpisodes busca episÃ³dios de um anime via Consumet
 func (a *App) GetConsumetEpisodes(animeID string, provider string) ([]ConsumetEpisode, error) {
 	if provider == "" {
 		provider = consumet.ProviderGogoanime
@@ -1562,7 +1579,7 @@ func (a *App) GetConsumetStream(episodeID string, provider string) (string, erro
 	return url, nil
 }
 
-// GetStreamWithFallback tenta múltiplas fontes para obter stream
+// GetStreamWithFallback tenta mÃºltiplas fontes para obter stream
 func (a *App) GetStreamWithFallback(animeTitle string, episodeNumber int) (string, error) {
 	fmt.Printf("[GetStreamWithFallback] Buscando stream para: %s Ep.%d\n", animeTitle, episodeNumber)
 
@@ -1589,7 +1606,7 @@ func (a *App) GetStreamWithFallback(animeTitle string, episodeNumber int) (strin
 // SMART ROUTER - Busca inteligente de streams com circuit breaker
 // ============================================================================
 
-// SmartStreamResult é o resultado da busca inteligente de stream
+// SmartStreamResult Ã© o resultado da busca inteligente de stream
 type SmartStreamResult struct {
 	URL      string  `json:"url"`
 	Source   string  `json:"source"`
@@ -1598,8 +1615,8 @@ type SmartStreamResult struct {
 	Error    string  `json:"error,omitempty"`
 }
 
-// GetSmartStream usa o Smart Router para buscar stream com fallback automático
-// Esta função tenta múltiplas fontes com timeout e circuit breaker
+// GetSmartStream usa o Smart Router para buscar stream com fallback automÃ¡tico
+// Esta funÃ§Ã£o tenta mÃºltiplas fontes com timeout e circuit breaker
 func (a *App) GetSmartStream(animeTitle string, episodeNumber int) (*SmartStreamResult, error) {
 	fmt.Printf("[SmartStream] Buscando: %s Ep.%d\n", animeTitle, episodeNumber)
 
@@ -1665,7 +1682,7 @@ func (a *App) GetSmartStreamParallel(animeTitle string, episodeNumber int) (*Sma
 	return smartResult, nil
 }
 
-// GetStreamSourceStats retorna estatísticas das fontes de streaming
+// GetStreamSourceStats retorna estatÃ­sticas das fontes de streaming
 func (a *App) GetStreamSourceStats() map[string]interface{} {
 	stats := a.streamRouter.GetAllStats()
 
@@ -1700,7 +1717,7 @@ func (a *App) ResetStreamCircuits() {
 // ANISKIP - Pular abertura/encerramento automaticamente
 // ============================================================================
 
-// SkipTimesResult contém os timestamps para pular abertura/encerramento
+// SkipTimesResult contÃ©m os timestamps para pular abertura/encerramento
 type SkipTimesResult struct {
 	HasOpening    bool    `json:"hasOpening"`
 	OpeningStart  float64 `json:"openingStart"`
@@ -1714,7 +1731,7 @@ type SkipTimesResult struct {
 	EpisodeLength float64 `json:"episodeLength"`
 }
 
-// GetSkipTimes busca os timestamps de abertura/encerramento para um episódio
+// GetSkipTimes busca os timestamps de abertura/encerramento para um episÃ³dio
 // Usa a AniSkip API (requer MAL ID do anime)
 func (a *App) GetSkipTimes(malID int, episodeNumber int) (*SkipTimesResult, error) {
 	fmt.Printf("[AniSkip] Buscando skip times: MAL ID=%d, Ep=%d\n", malID, episodeNumber)
@@ -1744,14 +1761,14 @@ func (a *App) GetSkipTimes(malID int, episodeNumber int) (*SkipTimesResult, erro
 		EpisodeLength: skipTimes.EpisodeLength,
 	}
 
-	// Salva no cache (30 minutos - skip times não mudam)
+	// Salva no cache (30 minutos - skip times nÃ£o mudam)
 	a.setCache(cacheKey, result, 30*time.Minute)
 
 	return result, nil
 }
 
-// GetSkipTimesAsync busca skip times de forma assíncrona
-// Retorna imediatamente e o resultado é obtido depois
+// GetSkipTimesAsync busca skip times de forma assÃ­ncrona
+// Retorna imediatamente e o resultado Ã© obtido depois
 func (a *App) GetSkipTimesAsync(malID int, episodeNumber int) {
 	go func() {
 		result, err := a.GetSkipTimes(malID, episodeNumber)
@@ -1770,7 +1787,7 @@ func (a *App) GetSkipTimesAsync(malID int, episodeNumber int) {
 }
 
 // ============================================================================
-// ENIME API - Fonte de vídeo rápida
+// ENIME API - Fonte de vÃ­deo rÃ¡pida
 // ============================================================================
 
 // EnimeAnime representa um anime da Enime API
@@ -1826,16 +1843,16 @@ func (a *App) GetEnimeStream(animeTitle string, episodeNumber int) (string, erro
 	return enime.FindAndGetStream(animeTitle, episodeNumber)
 }
 
-// normalizeAnimeName normaliza o nome do anime para comparação
+// normalizeAnimeName normaliza o nome do anime para comparaÃ§Ã£o
 func normalizeAnimeName(name string) string {
 	// Remove prefixos de fonte
 	name = regexp.MustCompile(`^\[.*?\]\s*`).ReplaceAllString(name, "")
 	// Remove sufixos comuns
 	name = regexp.MustCompile(`\s*\((?:Dublado|Legendado|Dub|Sub|TV|OVA|Movie)\).*$`).ReplaceAllString(name, "")
 	name = regexp.MustCompile(`\s*-\s*(?:Season|Part|Temporada).*$`).ReplaceAllString(name, "")
-	// Remove números de episódios
+	// Remove nÃºmeros de episÃ³dios
 	name = regexp.MustCompile(`\s*\(\d+\s*episodes?\).*$`).ReplaceAllString(name, "")
-	// Normaliza espaços e lowercase
+	// Normaliza espaÃ§os e lowercase
 	name = strings.TrimSpace(strings.ToLower(name))
 	// Remove caracteres especiais
 	name = regexp.MustCompile(`[^\w\s]`).ReplaceAllString(name, "")
@@ -1843,7 +1860,7 @@ func normalizeAnimeName(name string) string {
 	return name
 }
 
-// BuscarAnimes - busca RÁPIDA em ambas as fontes com cache otimizado
+// BuscarAnimes - busca RÃPIDA em ambas as fontes com cache otimizado
 func (a *App) BuscarAnimes(termo string) ([]store.SavedAnime, error) {
 	termoLower := strings.TrimSpace(strings.ToLower(termo))
 	if termoLower == "" {
@@ -1868,16 +1885,63 @@ func (a *App) BuscarAnimes(termo string) ([]store.SavedAnime, error) {
 		err    error
 	}
 
-	resultChan := make(chan searchResult, 2)
+	resultChan := make(chan searchResult, 4)
 
-	// AllAnime (inglês)
+	// AnimeFlix/GoFile Cache (brasileira com cache)
+	go func() {
+		if a.animesflixClient == nil {
+			a.animesflixClient = animesflix.NewClient()
+		}
+		if a.animesflixClient.IsAvailable() {
+			cacheResult, err := a.animesflixClient.SearchCache(termo)
+			if err == nil && cacheResult != nil && len(cacheResult.Results) > 0 {
+				converted := make([]*types.Anime, 0, len(cacheResult.Results))
+				for _, ca := range cacheResult.Results {
+					converted = append(converted, &types.Anime{
+						Name:     ca.AnimeTitle,
+						URL:      ca.GetURL(),
+						ImageURL: "",
+					})
+				}
+				resultChan <- searchResult{converted, "AnimeFlix", nil}
+				return
+			}
+		}
+		resultChan <- searchResult{nil, "AnimeFlix", fmt.Errorf("AnimeFlix indisponivel")}
+	}()
+
+	// GoFileCloud (biblioteca local com uploads)
+	go func() {
+		if a.gofileClient == nil {
+			a.gofileClient = gofilecloud.NewClient()
+		}
+		if a.gofileClient.IsAvailable() {
+			cacheResult, err := a.gofileClient.SearchCache(termo)
+			if err == nil && cacheResult != nil && len(cacheResult.Results) > 0 {
+				converted := make([]*types.Anime, 0, len(cacheResult.Results))
+				for _, ca := range cacheResult.Results {
+					animeURL := fmt.Sprintf("gofilecloud://%s/%d", ca.Slug, ca.ID)
+					converted = append(converted, &types.Anime{
+						Name:     ca.Name,
+						URL:      animeURL,
+						ImageURL: ca.Cover,
+					})
+				}
+				resultChan <- searchResult{converted, "GoFileCloud", nil}
+				return
+			}
+		}
+		resultChan <- searchResult{nil, "GoFileCloud", fmt.Errorf("GoFileCloud indisponivel")}
+	}()
+
+	// AllAnime (inglÃªs)
 	go func() {
 		srcAllAnime := types.SourceAllAnime
 		animes, err := a.client.SearchAnime(termo, &srcAllAnime)
 		resultChan <- searchResult{animes, "AllAnime", err}
 	}()
 
-	// AnimeFire (português)
+	// AnimeFire (portuguÃªs)
 	go func() {
 		srcAnimeFire := types.SourceAnimeFire
 		animes, err := a.client.SearchAnime(termo, &srcAnimeFire)
@@ -1889,7 +1953,7 @@ func (a *App) BuscarAnimes(termo string) ([]store.SavedAnime, error) {
 	timeout := time.After(4 * time.Second)
 	received := 0
 
-	for received < 2 {
+	for received < 4 {
 		select {
 		case res := <-resultChan:
 			received++
@@ -1937,7 +2001,7 @@ func (a *App) BuscarAnimes(termo string) ([]store.SavedAnime, error) {
 			}
 		case <-timeout:
 			fmt.Println("[BuscarAnimes] Timeout - usando resultados parciais")
-			received = 2
+			received = 3
 		}
 	}
 
@@ -1947,14 +2011,14 @@ func (a *App) BuscarAnimes(termo string) ([]store.SavedAnime, error) {
 		final = append(final, *anime)
 	}
 
-	// Ordena por número de fontes
+	// Ordena por nÃºmero de fontes
 	sort.Slice(final, func(i, j int) bool {
 		return len(final[i].Sources) > len(final[j].Sources)
 	})
 
-	// Busca imagens em paralelo para animes sem imagem (máximo 10 concurrent)
+	// Busca imagens em paralelo para animes sem imagem (mÃ¡ximo 10 concurrent)
 	var imgWg sync.WaitGroup
-	semaphore := make(chan struct{}, 10) // Aumentado para 10 goroutines simultâneas
+	semaphore := make(chan struct{}, 10) // Aumentado para 10 goroutines simultÃ¢neas
 
 	for i := range final {
 		if final[i].Image == "" {
@@ -1973,7 +2037,7 @@ func (a *App) BuscarAnimes(termo string) ([]store.SavedAnime, error) {
 		}
 	}
 
-	// Espera busca de imagens (com timeout de 2.5s - APIs já tem timeout interno)
+	// Espera busca de imagens (com timeout de 2.5s - APIs jÃ¡ tem timeout interno)
 	done := make(chan struct{})
 	go func() {
 		imgWg.Wait()
@@ -1994,7 +2058,7 @@ func (a *App) BuscarAnimes(termo string) ([]store.SavedAnime, error) {
 	return final, nil
 }
 
-// GetTopAnimes - retorna cache pré-carregado ou busca
+// GetTopAnimes - retorna cache prÃ©-carregado ou busca
 func (a *App) GetTopAnimes() ([]store.SavedAnime, error) {
 	a.cacheMutex.RLock()
 	if len(a.topAnimesCache) > 0 {
@@ -2078,7 +2142,7 @@ func (a *App) fetchTopAnimesInternal() ([]store.SavedAnime, error) {
 
 	wg.Wait()
 
-	// Se não conseguiu nenhum, fallback para Jikan
+	// Se nÃ£o conseguiu nenhum, fallback para Jikan
 	if len(result) == 0 {
 		animes, err := jikan.FetchTopAnimes()
 		if err != nil {
@@ -2115,7 +2179,7 @@ func (a *App) GetAnimeURL(title string) (string, error) {
 
 	searchResults, err := a.client.SearchAnime(title, nil)
 	if err != nil || len(searchResults) == 0 || searchResults[0] == nil {
-		return "", fmt.Errorf("anime não encontrado")
+		return "", fmt.Errorf("anime nÃ£o encontrado")
 	}
 
 	url := searchResults[0].URL
@@ -2128,7 +2192,7 @@ func (a *App) GetAnimeURL(title string) (string, error) {
 	return url, nil
 }
 
-// BuscarAnimesMulti - busca MÚLTIPLOS termos em PARALELO (para gêneros)
+// BuscarAnimesMulti - busca MÃšLTIPLOS termos em PARALELO (para gÃªneros)
 // Retorna todos os resultados combinados sem duplicatas
 func (a *App) BuscarAnimesMulti(termos []string) ([]store.SavedAnime, error) {
 	if len(termos) == 0 {
@@ -2145,7 +2209,7 @@ func (a *App) BuscarAnimesMulti(termos []string) ([]store.SavedAnime, error) {
 
 	resultChan := make(chan searchResult, len(termos))
 
-	// Lança TODAS as buscas em paralelo
+	// LanÃ§a TODAS as buscas em paralelo
 	for _, termo := range termos {
 		go func(t string) {
 			animes, err := a.BuscarAnimes(t)
@@ -2178,26 +2242,26 @@ func (a *App) BuscarAnimesMulti(termos []string) ([]store.SavedAnime, error) {
 				}
 			}
 		case <-timeout:
-			fmt.Printf("[BuscarAnimesMulti] Timeout após %d/%d buscas\n", received, len(termos))
+			fmt.Printf("[BuscarAnimesMulti] Timeout apÃ³s %d/%d buscas\n", received, len(termos))
 			received = len(termos)
 		}
 	}
 
-	fmt.Printf("[BuscarAnimesMulti] Total: %d animes únicos\n", len(allResults))
+	fmt.Printf("[BuscarAnimesMulti] Total: %d animes Ãºnicos\n", len(allResults))
 	return allResults, nil
 }
 
 // GetEpisodes - otimizado com cache e busca paralela
 func (a *App) GetEpisodes(seriesURL string) ([]store.Episode, error) {
 	if seriesURL == "" {
-		return nil, fmt.Errorf("URL inválida")
+		return nil, fmt.Errorf("URL invÃ¡lida")
 	}
 
 	// Verifica cache
 	a.cacheMutex.RLock()
 	if eps, ok := a.episodesCache[seriesURL]; ok && len(eps) > 0 {
 		a.cacheMutex.RUnlock()
-		fmt.Printf("[GetEpisodes] Cache hit: %d episódios\n", len(eps))
+		fmt.Printf("[GetEpisodes] Cache hit: %d episÃ³dios\n", len(eps))
 		return eps, nil
 	}
 	a.cacheMutex.RUnlock()
@@ -2236,10 +2300,10 @@ func (a *App) GetEpisodes(seriesURL string) ([]store.Episode, error) {
 				continue
 			}
 			mapped := a.convertEpisodes(res.episodes, res.source.String())
-			// Usa o resultado com mais episódios
+			// Usa o resultado com mais episÃ³dios
 			if len(mapped) > len(bestEpisodes) {
 				bestEpisodes = mapped
-				fmt.Printf("[GetEpisodes] %s: %d episódios (melhor até agora)\n", res.source, len(mapped))
+				fmt.Printf("[GetEpisodes] %s: %d episÃ³dios (melhor atÃ© agora)\n", res.source, len(mapped))
 			}
 		case <-timeout:
 			fmt.Println("[GetEpisodes] Timeout - usando melhores resultados")
@@ -2254,14 +2318,14 @@ func (a *App) GetEpisodes(seriesURL string) ([]store.Episode, error) {
 		return bestEpisodes, nil
 	}
 
-	// Fallback heurístico
+	// Fallback heurÃ­stico
 	return a.getEpisodesFallback(seriesURL)
 }
 
-// GetEpisodesForSource - busca episódios de uma fonte específica
+// GetEpisodesForSource - busca episÃ³dios de uma fonte especÃ­fica
 func (a *App) GetEpisodesForSource(sourceURL string, sourceName string) ([]store.Episode, error) {
 	if sourceURL == "" {
-		return nil, fmt.Errorf("URL inválida")
+		return nil, fmt.Errorf("URL invÃ¡lida")
 	}
 
 	cacheKey := fmt.Sprintf("%s:%s", sourceName, sourceURL)
@@ -2270,13 +2334,41 @@ func (a *App) GetEpisodesForSource(sourceURL string, sourceName string) ([]store
 	a.cacheMutex.RLock()
 	if eps, ok := a.episodesCache[cacheKey]; ok && len(eps) > 0 {
 		a.cacheMutex.RUnlock()
-		fmt.Printf("[GetEpisodesForSource] Cache hit: %d episódios de %s\n", len(eps), sourceName)
+		fmt.Printf("[GetEpisodesForSource] Cache hit: %d episÃ³dios de %s\n", len(eps), sourceName)
 		return eps, nil
 	}
 	a.cacheMutex.RUnlock()
 
 	if a.client == nil {
 		a.client = goanime.NewClient()
+	}
+
+	// Caso especial para AnimeFlix - usa cliente proprio
+	if strings.ToLower(sourceName) == "animesflix" || strings.Contains(strings.ToLower(sourceURL), "animesflix") {
+		if a.animesflixClient == nil {
+			a.animesflixClient = animesflix.NewClient()
+		}
+		details, err := a.animesflixClient.GetAnimeDetails(sourceURL)
+		if err == nil && details != nil {
+			var allEps []store.Episode
+			for _, season := range details.Seasons {
+				for _, ep := range season.Episodes {
+					allEps = append(allEps, store.Episode{
+						Number: func() int { n, _ := strconv.Atoi(ep.Number); return n }(),
+						Title:  ep.Title,
+						URL:    ep.URL,
+						Source: "AnimeFlix",
+					})
+				}
+			}
+			// Salva no cache
+			a.cacheMutex.Lock()
+			a.episodesCache[cacheKey] = allEps
+			a.cacheMutex.Unlock()
+			fmt.Printf("[GetEpisodesForSource] AnimeFlix: %d episodios\n", len(allEps))
+			return allEps, nil
+		}
+		fmt.Printf("[GetEpisodesForSource] AnimeFlix erro: %v\n", err)
 	}
 
 	// Determina a fonte correta
@@ -2306,7 +2398,7 @@ func (a *App) GetEpisodesForSource(sourceURL string, sourceName string) ([]store
 	a.episodesCache[cacheKey] = mapped
 	a.cacheMutex.Unlock()
 
-	fmt.Printf("[GetEpisodesForSource] Encontrados: %d episódios\n", len(mapped))
+	fmt.Printf("[GetEpisodesForSource] Encontrados: %d episÃ³dios\n", len(mapped))
 	return mapped, nil
 }
 
@@ -2365,7 +2457,7 @@ func (a *App) getEpisodesFallback(seriesURL string) ([]store.Episode, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -2377,7 +2469,7 @@ func (a *App) getEpisodesFallback(seriesURL string) ([]store.Episode, error) {
 		for i := range eps {
 			eps[i].Source = fallbackSource
 		}
-		fmt.Printf("[GetEpisodes] Encontrados %d episódios via JSON-LD\n", len(eps))
+		fmt.Printf("[GetEpisodes] Encontrados %d episÃ³dios via JSON-LD\n", len(eps))
 		a.episodesCache[seriesURL] = eps
 		return eps, nil
 	}
@@ -2388,7 +2480,7 @@ func (a *App) getEpisodesFallback(seriesURL string) ([]store.Episode, error) {
 		for i := range eps {
 			eps[i].Source = fallbackSource
 		}
-		fmt.Printf("[GetEpisodes] Encontrados %d episódios via JS arrays\n", len(eps))
+		fmt.Printf("[GetEpisodes] Encontrados %d episÃ³dios via JS arrays\n", len(eps))
 		a.episodesCache[seriesURL] = eps
 		return eps, nil
 	}
@@ -2399,25 +2491,25 @@ func (a *App) getEpisodesFallback(seriesURL string) ([]store.Episode, error) {
 		for i := range eps {
 			eps[i].Source = fallbackSource
 		}
-		fmt.Printf("[GetEpisodes] Encontrados %d episódios via data-attributes\n", len(eps))
+		fmt.Printf("[GetEpisodes] Encontrados %d episÃ³dios via data-attributes\n", len(eps))
 		a.episodesCache[seriesURL] = eps
 		return eps, nil
 	}
 
-	// 4) Para AnimeFire: busca específica por links de episódios
+	// 4) Para AnimeFire: busca especÃ­fica por links de episÃ³dios
 	if strings.Contains(seriesURL, "animefire") {
 		eps := a.parseAnimeFireEpisodes(seriesURL, html)
 		if len(eps) > 0 {
 			for i := range eps {
 				eps[i].Source = fallbackSource
 			}
-			fmt.Printf("[GetEpisodes] Encontrados %d episódios via AnimeFire parser\n", len(eps))
+			fmt.Printf("[GetEpisodes] Encontrados %d episÃ³dios via AnimeFire parser\n", len(eps))
 			a.episodesCache[seriesURL] = eps
 			return eps, nil
 		}
 	}
 
-	// 5) fallback clássico: procura <a> mas com filtros mais rigorosos
+	// 5) fallback clÃ¡ssico: procura <a> mas com filtros mais rigorosos
 	re := regexp.MustCompile(`(?i)<a[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>`)
 	matches := re.FindAllStringSubmatch(html, -1)
 	episodesMap := make(map[int]store.Episode)
@@ -2440,7 +2532,7 @@ func (a *App) getEpisodesFallback(seriesURL string) ([]store.Episode, error) {
 		text := stripTags(m[2])
 		href = normalizeURL(seriesURL, href)
 
-		// Ignora URLs que não são do mesmo anime
+		// Ignora URLs que nÃ£o sÃ£o do mesmo anime
 		if baseSlug != "" && !strings.Contains(href, baseSlug) {
 			continue
 		}
@@ -2451,7 +2543,7 @@ func (a *App) getEpisodesFallback(seriesURL string) ([]store.Episode, error) {
 			continue
 		}
 
-		// Procura padrão de episódio: /anime-slug/NUMERO
+		// Procura padrÃ£o de episÃ³dio: /anime-slug/NUMERO
 		epNumRe := regexp.MustCompile(`/([^/]+)/(\d+)$`)
 		epMatch := epNumRe.FindStringSubmatch(href)
 		if epMatch != nil {
@@ -2461,7 +2553,7 @@ func (a *App) getEpisodesFallback(seriesURL string) ([]store.Episode, error) {
 				if _, exists := episodesMap[num]; !exists {
 					// Extrai nome do anime do slug
 					animeSlug := epMatch[1]
-					title := fmt.Sprintf("Episódio %d", num)
+					var title string
 
 					// Formata título bonito
 					if text != "" && len(text) < 100 {
@@ -2469,8 +2561,8 @@ func (a *App) getEpisodesFallback(seriesURL string) ([]store.Episode, error) {
 					} else {
 						// Converte slug para título
 						niceName := strings.ReplaceAll(animeSlug, "-", " ")
-						niceName = strings.Title(niceName)
-						title = fmt.Sprintf("%s - Episódio %d", niceName, num)
+						niceName = toTitleCase(niceName)
+						title = fmt.Sprintf("%s - Episodio %d", niceName, num)
 					}
 
 					episodesMap[num] = store.Episode{
@@ -2491,12 +2583,12 @@ func (a *App) getEpisodesFallback(seriesURL string) ([]store.Episode, error) {
 	}
 	sort.Slice(final, func(i, j int) bool { return final[i].Number < final[j].Number })
 
-	fmt.Printf("[GetEpisodes] Encontrados %d possíveis episódios (heurística)\n", len(final))
+	fmt.Printf("[GetEpisodes] Encontrados %d possÃ­veis episÃ³dios (heurÃ­stica)\n", len(final))
 	a.episodesCache[seriesURL] = final
 	return final, nil
 }
 
-// parseAnimeFireEpisodes extrai episódios especificamente do AnimeFire
+// parseAnimeFireEpisodes extrai episÃ³dios especificamente do AnimeFire
 func (a *App) parseAnimeFireEpisodes(baseURL, html string) []store.Episode {
 	var episodes []store.Episode
 
@@ -2514,7 +2606,7 @@ func (a *App) parseAnimeFireEpisodes(baseURL, html string) []store.Episode {
 	fmt.Printf("[parseAnimeFireEpisodes] URL: %s, baseSlug: %s\n", baseURL, baseSlug)
 
 	if baseSlug == "" {
-		// Tenta extrair o slug de outra forma - último segmento da URL
+		// Tenta extrair o slug de outra forma - Ãºltimo segmento da URL
 		if len(parts) > 0 {
 			lastPart := parts[len(parts)-1]
 			baseSlug = strings.TrimSuffix(lastPart, "-todos-os-episodios")
@@ -2527,7 +2619,7 @@ func (a *App) parseAnimeFireEpisodes(baseURL, html string) []store.Episode {
 
 	seen := make(map[int]bool)
 
-	// Método 1: Procura divNumEP que é o container de episódios do AnimeFire
+	// MÃ©todo 1: Procura divNumEP que Ã© o container de episÃ³dios do AnimeFire
 	// <div class="divNumEP"><a href="https://animefire.plus/animes/slug/1">1</a></div>
 	divPattern := regexp.MustCompile(`class="divNumEP"[^>]*>.*?<a[^>]*href=["']([^"']+)["'][^>]*>`)
 	divMatches := divPattern.FindAllStringSubmatch(html, -1)
@@ -2537,7 +2629,7 @@ func (a *App) parseAnimeFireEpisodes(baseURL, html string) []store.Episode {
 	for _, m := range divMatches {
 		if len(m) >= 2 {
 			url := m[1]
-			// Extrai número do episódio da URL (último segmento)
+			// Extrai nÃºmero do episÃ³dio da URL (Ãºltimo segmento)
 			urlParts := strings.Split(strings.TrimSuffix(url, "/"), "/")
 			if len(urlParts) > 0 {
 				numStr := urlParts[len(urlParts)-1]
@@ -2545,8 +2637,8 @@ func (a *App) parseAnimeFireEpisodes(baseURL, html string) []store.Episode {
 				if err == nil && num > 0 && num < 2000 && !seen[num] {
 					seen[num] = true
 					niceName := strings.ReplaceAll(baseSlug, "-", " ")
-					niceName = strings.Title(niceName)
-					title := fmt.Sprintf("%s - Episódio %d", niceName, num)
+					niceName = toTitleCase(niceName)
+					title := fmt.Sprintf("%s - EpisÃ³dio %d", niceName, num)
 					episodes = append(episodes, store.Episode{
 						Title:  title,
 						URL:    url,
@@ -2558,9 +2650,9 @@ func (a *App) parseAnimeFireEpisodes(baseURL, html string) []store.Episode {
 		}
 	}
 
-	// Método 2: Procura padrão mais genérico de links /animes/SLUG/NUMERO
+	// MÃ©todo 2: Procura padrÃ£o mais genÃ©rico de links /animes/SLUG/NUMERO
 	if len(episodes) == 0 {
-		// Padrão genérico para links de episódios AnimeFire
+		// PadrÃ£o genÃ©rico para links de episÃ³dios AnimeFire
 		genericPattern := regexp.MustCompile(`href=["'](https?://[^"']*animefire[^"']*/animes/[^/]+/(\d+))["']`)
 		genericMatches := genericPattern.FindAllStringSubmatch(html, -1)
 
@@ -2570,7 +2662,7 @@ func (a *App) parseAnimeFireEpisodes(baseURL, html string) []store.Episode {
 			if len(m) >= 3 {
 				url := m[1]
 				num, _ := strconv.Atoi(m[2])
-				// Verifica se o URL contém parte do slug (flexível)
+				// Verifica se o URL contÃ©m parte do slug (flexÃ­vel)
 				slugWords := strings.Split(baseSlug, "-")
 				matchCount := 0
 				for _, word := range slugWords {
@@ -2578,13 +2670,13 @@ func (a *App) parseAnimeFireEpisodes(baseURL, html string) []store.Episode {
 						matchCount++
 					}
 				}
-				// Se pelo menos metade das palavras combinam, consideramos válido
+				// Se pelo menos metade das palavras combinam, consideramos vÃ¡lido
 				if matchCount >= len(slugWords)/2 || strings.Contains(url, baseSlug) {
 					if num > 0 && num < 2000 && !seen[num] {
 						seen[num] = true
 						niceName := strings.ReplaceAll(baseSlug, "-", " ")
-						niceName = strings.Title(niceName)
-						title := fmt.Sprintf("%s - Episódio %d", niceName, num)
+						niceName = toTitleCase(niceName)
+						title := fmt.Sprintf("%s - EpisÃ³dio %d", niceName, num)
 						episodes = append(episodes, store.Episode{
 							Title:  title,
 							URL:    url,
@@ -2597,7 +2689,7 @@ func (a *App) parseAnimeFireEpisodes(baseURL, html string) []store.Episode {
 		}
 	}
 
-	// Método 3: Se ainda vazio, procura qualquer link para animes com número no final
+	// MÃ©todo 3: Se ainda vazio, procura qualquer link para animes com nÃºmero no final
 	if len(episodes) == 0 {
 		anyEpPattern := regexp.MustCompile(`href=["'](https?://animefire\.[^"']+/animes/[^"']+/(\d+))["']`)
 		anyMatches := anyEpPattern.FindAllStringSubmatch(html, -1)
@@ -2611,8 +2703,8 @@ func (a *App) parseAnimeFireEpisodes(baseURL, html string) []store.Episode {
 				if num > 0 && num < 2000 && !seen[num] {
 					seen[num] = true
 					niceName := strings.ReplaceAll(baseSlug, "-", " ")
-					niceName = strings.Title(niceName)
-					title := fmt.Sprintf("%s - Episódio %d", niceName, num)
+					niceName = toTitleCase(niceName)
+					title := fmt.Sprintf("%s - EpisÃ³dio %d", niceName, num)
 					episodes = append(episodes, store.Episode{
 						Title:  title,
 						URL:    url,
@@ -2624,7 +2716,7 @@ func (a *App) parseAnimeFireEpisodes(baseURL, html string) []store.Episode {
 		}
 	}
 
-	fmt.Printf("[parseAnimeFireEpisodes] Total episódios encontrados: %d\n", len(episodes))
+	fmt.Printf("[parseAnimeFireEpisodes] Total episÃ³dios encontrados: %d\n", len(episodes))
 
 	sort.Slice(episodes, func(i, j int) bool { return episodes[i].Number < episodes[j].Number })
 	return episodes
@@ -2662,7 +2754,7 @@ func normalizeURL(base, href string) string {
 	return base + "/" + href
 }
 
-// parseJSONLDScripts tenta extrair episódios de <script type="application/ld+json"> contendo Episode
+// parseJSONLDScripts tenta extrair episÃ³dios de <script type="application/ld+json"> contendo Episode
 func parseJSONLDScripts(baseURL, html string) []store.Episode {
 	re := regexp.MustCompile(`(?is)<script[^>]+type=["']application/ld\+json["'][^>]*>(.*?)</script>`)
 	matches := re.FindAllStringSubmatch(html, -1)
@@ -2783,8 +2875,8 @@ func parseDataAttributes(baseURL, html string) []store.Episode {
 	return out
 }
 
-// PlayVideo recebe o link e o título e manda pro MPV
-// Usa a implementação robusta de PlayAnime que procura o MPV em vários locais
+// PlayVideo recebe o link e o tÃ­tulo e manda pro MPV
+// Usa a implementaÃ§Ã£o robusta de PlayAnime que procura o MPV em vÃ¡rios locais
 func (a *App) PlayVideo(url string, title string) error {
 	fmt.Printf("[PlayVideo] Frontend pediu play: %s (URL: %s)\n", title, url)
 	return a.PlayAnime(url)
@@ -2793,7 +2885,7 @@ func (a *App) PlayVideo(url string, title string) error {
 // PlayAnime reproduz o anime no MPV (com suporte a yt-dlp para URLs complexas)
 func (a *App) PlayAnime(url string) error {
 	if url == "" {
-		return fmt.Errorf("URL inválida")
+		return fmt.Errorf("URL invÃ¡lida")
 	}
 
 	fmt.Printf("Iniciando MPV com URL: %s\n", url)
@@ -2801,7 +2893,7 @@ func (a *App) PlayAnime(url string) error {
 	// Encontra o caminho do MPV
 	mpvPath := a.findMPVPath()
 	if mpvPath == "" {
-		return fmt.Errorf("MPV não encontrado. Instale o MPV ou coloque na pasta bin/")
+		return fmt.Errorf("MPV nÃ£o encontrado. Instale o MPV ou coloque na pasta bin/")
 	}
 
 	// Argumentos base do MPV
@@ -2811,7 +2903,7 @@ func (a *App) PlayAnime(url string) error {
 		"--vo=gpu",
 	}
 
-	// Só usa yt-dlp se a URL NÃO for um stream direto
+	// SÃ³ usa yt-dlp se a URL NÃƒO for um stream direto
 	isDirectStream := strings.HasSuffix(url, ".mp4") ||
 		strings.HasSuffix(url, ".m3u8") ||
 		strings.HasSuffix(url, ".webm") ||
@@ -2819,17 +2911,17 @@ func (a *App) PlayAnime(url string) error {
 		strings.Contains(url, ".m3u8?")
 
 	if !isDirectStream && (strings.Contains(url, "/video/") || strings.Contains(url, "/embed/")) {
-		// Verifica se yt-dlp está disponível
+		// Verifica se yt-dlp estÃ¡ disponÃ­vel
 		ytdlpPath := a.findYtdlpPath()
 		if ytdlpPath != "" {
-			fmt.Printf("[PlayAnime] URL é página web, usando yt-dlp: %s\n", ytdlpPath)
+			fmt.Printf("[PlayAnime] URL Ã© pÃ¡gina web, usando yt-dlp: %s\n", ytdlpPath)
 			args = append(args, "--ytdl-path="+ytdlpPath)
 			args = append(args, "--ytdl-format=best")
 		} else {
-			fmt.Println("[PlayAnime] yt-dlp não encontrado, tentando direto...")
+			fmt.Println("[PlayAnime] yt-dlp nÃ£o encontrado, tentando direto...")
 		}
 	} else {
-		fmt.Printf("[PlayAnime] URL é stream direto, reproduzindo diretamente\n")
+		fmt.Printf("[PlayAnime] URL Ã© stream direto, reproduzindo diretamente\n")
 	}
 
 	args = append(args, url)
@@ -2844,6 +2936,12 @@ func (a *App) PlayAnime(url string) error {
 	return nil
 }
 
+// IsMPVInstalled verifica se o MPV está instalado e disponível
+func (a *App) IsMPVInstalled() bool {
+	path := a.findMPVPath()
+	return path != ""
+}
+
 // findMPVPath procura o MPV em vários locais
 func (a *App) findMPVPath() string {
 	// 1) Caminho salvo pelo usuário
@@ -2853,23 +2951,48 @@ func (a *App) findMPVPath() string {
 		}
 	}
 
-	// 2) mpv no PATH
+	// 2) Caminho do instalador (registro do Windows)
+	if path := a.getMPVPathFromRegistry(); path != "" {
+		return path
+	}
+
+	// 3) mpv no PATH
 	if path, err := exec.LookPath("mpv"); err == nil {
 		return path
 	}
 
-	// 3) caminhos possíveis
+	// 4) Caminhos possíveis
 	possiblePaths := []string{}
+
+	// Diretório do executável (instalador coloca aqui)
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exePath)
+		possiblePaths = append(possiblePaths,
+			filepath.Join(exeDir, "mpv", "mpv.exe"),
+			filepath.Join(exeDir, "bin", "mpv.exe"),
+		)
+	}
 
 	// Diretório atual
 	if dir, err := os.Getwd(); err == nil {
-		possiblePaths = append(possiblePaths, filepath.Join(dir, "bin", "mpv.exe"))
+		possiblePaths = append(possiblePaths,
+			filepath.Join(dir, "mpv", "mpv.exe"),
+			filepath.Join(dir, "bin", "mpv.exe"),
+		)
 	}
 
+	// Caminhos padrão do sistema
+	username := os.Getenv("USERNAME")
+	localAppData := os.Getenv("LOCALAPPDATA")
+	programFiles := os.Getenv("PROGRAMFILES")
+
 	possiblePaths = append(possiblePaths,
-		"bin/mpv.exe",
+		filepath.Join(localAppData, "Programs", "GoAnime", "mpv", "mpv.exe"),
+		filepath.Join(localAppData, "mpv", "mpv.exe"),
+		filepath.Join(programFiles, "mpv", "mpv.exe"),
 		"C:\\Program Files\\mpv\\mpv.exe",
-		"C:\\Users\\"+os.Getenv("USERNAME")+"\\AppData\\Local\\mpv\\mpv.exe",
+		"C:\\Users\\"+username+"\\AppData\\Local\\mpv\\mpv.exe",
+		"bin/mpv.exe",
 	)
 
 	for _, path := range possiblePaths {
@@ -2880,6 +3003,33 @@ func (a *App) findMPVPath() string {
 				store.SaveUser(a.User)
 			}
 			return path
+		}
+	}
+
+	return ""
+}
+
+// getMPVPathFromRegistry obtém o caminho do MPV salvo pelo instalador
+func (a *App) getMPVPathFromRegistry() string {
+	// Tenta ler do registro do Windows (definido pelo instalador)
+	// HKCU\Software\GoAnime\MPVPath
+	cmd := exec.Command("reg", "query", "HKCU\\Software\\GoAnime", "/v", "MPVPath")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	// Parse output: "    MPVPath    REG_SZ    C:\path\to\mpv.exe"
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "MPVPath") && strings.Contains(line, "REG_SZ") {
+			parts := strings.Split(line, "REG_SZ")
+			if len(parts) > 1 {
+				path := strings.TrimSpace(parts[1])
+				if _, err := os.Stat(path); err == nil {
+					return path
+				}
+			}
 		}
 	}
 
@@ -2917,8 +3067,8 @@ func (a *App) findYtdlpPath() string {
 	return ""
 }
 
-// GetStreamURLForEpisode retorna a URL real do vídeo (WebSprit, CDN) usando a biblioteca GoAnime
-// Implementa cache inteligente com validação de URL e fallback automático entre fontes
+// GetStreamURLForEpisode retorna a URL real do vÃ­deo (WebSprit, CDN) usando a biblioteca GoAnime
+// Implementa cache inteligente com validaÃ§Ã£o de URL e fallback automÃ¡tico entre fontes
 func (a *App) GetStreamURLForEpisode(animeURL string, episodeURL string) (string, error) {
 	if a.client == nil {
 		a.client = goanime.NewClient()
@@ -2926,7 +3076,7 @@ func (a *App) GetStreamURLForEpisode(animeURL string, episodeURL string) (string
 
 	fmt.Printf("[GetStreamURLForEpisode] AnimeURL: %s, EpisodeURL: %s\n", animeURL, episodeURL)
 
-	// === CACHE INTELIGENTE COM VALIDAÇÃO ===
+	// === CACHE INTELIGENTE COM VALIDAÃ‡ÃƒO ===
 	cacheKey := fmt.Sprintf("stream:%s", episodeURL)
 
 	// Primeiro, tenta o cache inteligente de streams
@@ -2935,7 +3085,7 @@ func (a *App) GetStreamURLForEpisode(animeURL string, episodeURL string) (string
 		return cachedURL, nil
 	}
 
-	// Fallback para cache antigo (migração)
+	// Fallback para cache antigo (migraÃ§Ã£o)
 	if cached, ok := a.getCache(cacheKey); ok {
 		cachedURL := cached.(string)
 		fmt.Println("[GetStreamURLForEpisode] Cache legado hit, validando...")
@@ -2946,10 +3096,10 @@ func (a *App) GetStreamURLForEpisode(animeURL string, episodeURL string) (string
 			a.SetStreamCache(cacheKey, cachedURL, "legacy", CacheTTLStream)
 			return cachedURL, nil
 		}
-		fmt.Println("[GetStreamURLForEpisode] URL do cache legado inválida, buscando nova...")
+		fmt.Println("[GetStreamURLForEpisode] URL do cache legado invÃ¡lida, buscando nova...")
 	}
 
-	// === DETECÇÃO DE FONTE ===
+	// === DETECÃ‡ÃƒO DE FONTE ===
 	var primarySource types.Source
 	var sourceName string
 	if strings.Contains(strings.ToLower(animeURL), "animefire") || strings.Contains(strings.ToLower(episodeURL), "animefire") {
@@ -2960,7 +3110,7 @@ func (a *App) GetStreamURLForEpisode(animeURL string, episodeURL string) (string
 		sourceName = "AllAnime"
 	}
 
-	// Verifica se a fonte primária está disponível (não em cooldown)
+	// Verifica se a fonte primÃ¡ria estÃ¡ disponÃ­vel (nÃ£o em cooldown)
 	if !a.IsSourceAvailable(sourceName) {
 		altSource := a.GetAlternativeSource(sourceName)
 		if altSource != "" {
@@ -2974,7 +3124,7 @@ func (a *App) GetStreamURLForEpisode(animeURL string, episodeURL string) (string
 		}
 	}
 
-	// === BUSCA EPISÓDIO NO CACHE ===
+	// === BUSCA EPISÃ“DIO NO CACHE ===
 	var cachedEpisodes []store.Episode
 	var exists bool
 
@@ -2992,8 +3142,8 @@ func (a *App) GetStreamURLForEpisode(animeURL string, episodeURL string) (string
 	a.cacheMutex.RUnlock()
 
 	if !exists || len(cachedEpisodes) == 0 {
-		fmt.Printf("[GetStreamURLForEpisode] Episódios não encontrados no cache para: %s\n", animeURL)
-		return "", fmt.Errorf("episódios não encontrados no cache")
+		fmt.Printf("[GetStreamURLForEpisode] EpisÃ³dios nÃ£o encontrados no cache para: %s\n", animeURL)
+		return "", fmt.Errorf("episÃ³dios nÃ£o encontrados no cache")
 	}
 
 	var targetEpisode *store.Episode
@@ -3005,11 +3155,11 @@ func (a *App) GetStreamURLForEpisode(animeURL string, episodeURL string) (string
 	}
 
 	if targetEpisode == nil {
-		fmt.Printf("[GetStreamURLForEpisode] Episódio não encontrado: %s\n", episodeURL)
-		return "", fmt.Errorf("episódio não encontrado")
+		fmt.Printf("[GetStreamURLForEpisode] EpisÃ³dio nÃ£o encontrado: %s\n", episodeURL)
+		return "", fmt.Errorf("episÃ³dio nÃ£o encontrado")
 	}
 
-	fmt.Printf("[GetStreamURLForEpisode] Episódio: %s (Número: %d, Source: '%s')\n",
+	fmt.Printf("[GetStreamURLForEpisode] EpisÃ³dio: %s (NÃºmero: %d, Source: '%s')\n",
 		targetEpisode.Title, targetEpisode.Number, targetEpisode.Source)
 
 	if targetEpisode.Source != "" {
@@ -3021,19 +3171,19 @@ func (a *App) GetStreamURLForEpisode(animeURL string, episodeURL string) (string
 	fmt.Printf("[GetStreamURLForEpisode] Usando source: %v\n", primarySource)
 
 	// === BUSCA PARALELA DE TODAS AS FONTES ===
-	// Lança goroutines para buscar de todas as fontes simultaneamente
-	// Retorna assim que a primeira encontrar uma URL válida
+	// LanÃ§a goroutines para buscar de todas as fontes simultaneamente
+	// Retorna assim que a primeira encontrar uma URL vÃ¡lida
 
 	allSources := []struct {
 		name   string
 		source types.Source
 	}{
-		{sourceName, primarySource}, // Fonte primária primeiro
+		{sourceName, primarySource}, // Fonte primÃ¡ria primeiro
 		{"AllAnime", types.SourceAllAnime},
 		{"AnimeFire", types.SourceAnimeFire},
 	}
 
-	// Remove duplicatas (se primarySource já está na lista)
+	// Remove duplicatas (se primarySource jÃ¡ estÃ¡ na lista)
 	uniqueSources := make([]struct {
 		name   string
 		source types.Source
@@ -3054,7 +3204,7 @@ func (a *App) GetStreamURLForEpisode(animeURL string, episodeURL string) (string
 
 	resultChan := make(chan streamResult, len(uniqueSources)+1) // +1 para Smart Router
 
-	// Lança goroutines para cada fonte
+	// LanÃ§a goroutines para cada fonte
 	var wg sync.WaitGroup
 	for _, src := range uniqueSources {
 		if !a.IsSourceAvailable(src.name) {
@@ -3075,14 +3225,14 @@ func (a *App) GetStreamURLForEpisode(animeURL string, episodeURL string) (string
 					resultChan <- streamResult{url: url, source: srcName, err: nil}
 					return
 				}
-				resultChan <- streamResult{url: "", source: srcName, err: fmt.Errorf("URL inválida")}
+				resultChan <- streamResult{url: "", source: srcName, err: fmt.Errorf("URL invÃ¡lida")}
 				return
 			}
 			resultChan <- streamResult{url: "", source: srcName, err: err}
 		}(src.name, src.source)
 	}
 
-	// Também tenta o Smart Router em paralelo
+	// TambÃ©m tenta o Smart Router em paralelo
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -3103,7 +3253,7 @@ func (a *App) GetStreamURLForEpisode(animeURL string, episodeURL string) (string
 		close(resultChan)
 	}()
 
-	// Espera pelo primeiro resultado válido ou timeout
+	// Espera pelo primeiro resultado vÃ¡lido ou timeout
 	timeout := time.After(10 * time.Second)
 	var lastError error
 
@@ -3112,16 +3262,16 @@ func (a *App) GetStreamURLForEpisode(animeURL string, episodeURL string) (string
 		case result, ok := <-resultChan:
 			if !ok {
 				// Canal fechado, todas as fontes falharam
-				return "", fmt.Errorf("não foi possível obter stream URL de nenhuma fonte: %v", lastError)
+				return "", fmt.Errorf("nÃ£o foi possÃ­vel obter stream URL de nenhuma fonte: %v", lastError)
 			}
 
 			if result.url != "" {
 				// Encontrou! Cacheia e retorna imediatamente
 				a.SetStreamCache(cacheKey, result.url, result.source, CacheTTLStream)
 				a.recordSourceSuccess(result.source)
-				fmt.Printf("[GetStreamURLForEpisode] ✓ Sucesso com %s (paralelo)!\n", result.source)
+				fmt.Printf("[GetStreamURLForEpisode] âœ“ Sucesso com %s (paralelo)!\n", result.source)
 
-				// Inicia prefetch dos próximos episódios em background
+				// Inicia prefetch dos prÃ³ximos episÃ³dios em background
 				go a.prefetchNextEpisodes(animeURL, cachedEpisodes, targetEpisode.Number)
 
 				return result.url, nil
@@ -3136,19 +3286,19 @@ func (a *App) GetStreamURLForEpisode(animeURL string, episodeURL string) (string
 	}
 }
 
-// prefetchNextEpisodes pré-carrega URLs dos próximos episódios em background
+// prefetchNextEpisodes prÃ©-carrega URLs dos prÃ³ximos episÃ³dios em background
 func (a *App) prefetchNextEpisodes(animeURL string, episodes []store.Episode, currentEpNum int) {
-	// Pré-carrega os próximos 2 episódios
+	// PrÃ©-carrega os prÃ³ximos 2 episÃ³dios
 	for _, ep := range episodes {
 		if ep.Number > currentEpNum && ep.Number <= currentEpNum+2 {
 			cacheKey := fmt.Sprintf("stream:%s", ep.URL)
 
-			// Verifica se já está no cache
+			// Verifica se jÃ¡ estÃ¡ no cache
 			if _, ok := a.GetValidatedStreamCache(cacheKey); ok {
 				continue
 			}
 
-			// Verifica se já está em prefetch
+			// Verifica se jÃ¡ estÃ¡ em prefetch
 			a.prefetchMutex.RLock()
 			inProgress := a.prefetchActive[cacheKey]
 			a.prefetchMutex.RUnlock()
@@ -3161,7 +3311,7 @@ func (a *App) prefetchNextEpisodes(animeURL string, episodes []store.Episode, cu
 			a.prefetchActive[cacheKey] = true
 			a.prefetchMutex.Unlock()
 
-			fmt.Printf("[Prefetch] Pré-carregando episódio %d...\n", ep.Number)
+			fmt.Printf("[Prefetch] PrÃ©-carregando episÃ³dio %d...\n", ep.Number)
 
 			// Busca em background (sem esperar)
 			go func(episode store.Episode) {
@@ -3171,7 +3321,7 @@ func (a *App) prefetchNextEpisodes(animeURL string, episodes []store.Episode, cu
 					a.prefetchMutex.Unlock()
 				}()
 
-				// Usa apenas a fonte primária para prefetch (mais rápido)
+				// Usa apenas a fonte primÃ¡ria para prefetch (mais rÃ¡pido)
 				var source types.Source
 				if strings.Contains(episode.URL, "animefire") {
 					source = types.SourceAnimeFire
@@ -3184,7 +3334,7 @@ func (a *App) prefetchNextEpisodes(animeURL string, episodes []store.Episode, cu
 					if valid, _ := a.ValidateStreamURL(url); valid {
 						key := fmt.Sprintf("stream:%s", episode.URL)
 						a.SetStreamCache(key, url, source.String(), CacheTTLStream)
-						fmt.Printf("[Prefetch] ✓ Episódio %d pré-carregado!\n", episode.Number)
+						fmt.Printf("[Prefetch] âœ“ EpisÃ³dio %d prÃ©-carregado!\n", episode.Number)
 					}
 				}
 			}(ep)
@@ -3192,7 +3342,7 @@ func (a *App) prefetchNextEpisodes(animeURL string, episodes []store.Episode, cu
 	}
 }
 
-// tryGetStreamFromSource tenta obter stream de uma fonte específica
+// tryGetStreamFromSource tenta obter stream de uma fonte especÃ­fica
 func (a *App) tryGetStreamFromSource(episode *store.Episode, animeURL, episodeURL string, source types.Source) (string, error) {
 	anime := &types.Anime{
 		Name:   episode.Title,
@@ -3206,7 +3356,7 @@ func (a *App) tryGetStreamFromSource(episode *store.Episode, animeURL, episodeUR
 		Num:    episode.Number,
 	}
 
-	// Tenta usar o método da biblioteca primeiro
+	// Tenta usar o mÃ©todo da biblioteca primeiro
 	streamURL, metadata, err := a.client.GetEpisodeStreamURL(anime, ep, &goanime.StreamOptions{
 		Quality: "best",
 		Mode:    "sub",
@@ -3225,10 +3375,10 @@ func (a *App) tryGetStreamFromSource(episode *store.Episode, animeURL, episodeUR
 		fmt.Printf("[tryGetStreamFromSource] Usando extrator HTML para AnimeFire...\n")
 		streamURL, err = videoextractor.ExtractVideoURL(episodeURL)
 		if err != nil {
-			return "", fmt.Errorf("falha na extração HTML: %w", err)
+			return "", fmt.Errorf("falha na extraÃ§Ã£o HTML: %w", err)
 		}
 		if streamURL != "" {
-			fmt.Printf("[tryGetStreamFromSource] Stream extraído do HTML: %s\n", streamURL)
+			fmt.Printf("[tryGetStreamFromSource] Stream extraÃ­do do HTML: %s\n", streamURL)
 			return streamURL, nil
 		}
 	}
@@ -3236,24 +3386,24 @@ func (a *App) tryGetStreamFromSource(episode *store.Episode, animeURL, episodeUR
 	return "", fmt.Errorf("fonte %s falhou: %v", source, err)
 }
 
-// AssistirEpisodio é a função MÁGICA que o Svelte vai chamar ao clicar no episódio
+// AssistirEpisodio Ã© a funÃ§Ã£o MÃGICA que o Svelte vai chamar ao clicar no episÃ³dio
 func (a *App) AssistirEpisodio(animeURL string, episodeURL string, episodeTitle string) error {
 	fmt.Printf("[AssistirEpisodio] Iniciando processo para: %s\n", episodeTitle)
 
-	// 1. Extrai o link real do vídeo (MP4/M3U8) usando sua função existente
+	// 1. Extrai o link real do vÃ­deo (MP4/M3U8) usando sua funÃ§Ã£o existente
 	streamURL, err := a.GetStreamURLForEpisode(animeURL, episodeURL)
 	if err != nil {
 		fmt.Printf("[AssistirEpisodio] Falha ao extrair link: %v\n", err)
-		return fmt.Errorf("não foi possível extrair o vídeo: %v", err)
+		return fmt.Errorf("nÃ£o foi possÃ­vel extrair o vÃ­deo: %v", err)
 	}
 
 	if streamURL == "" {
-		return fmt.Errorf("link de vídeo retornado vazio")
+		return fmt.Errorf("link de vÃ­deo retornado vazio")
 	}
 
-	fmt.Printf("[AssistirEpisodio] Link extraído com sucesso: %s\n", streamURL)
+	fmt.Printf("[AssistirEpisodio] Link extraÃ­do com sucesso: %s\n", streamURL)
 
-	// 2. Manda o MPV tocar o link REAL do vídeo
+	// 2. Manda o MPV tocar o link REAL do vÃ­deo
 	return a.PlayVideo(streamURL, episodeTitle)
 }
 
@@ -3261,7 +3411,7 @@ func (a *App) AssistirEpisodio(animeURL string, episodeURL string, episodeTitle 
 // DISCORD INTEGRATION
 // ============================================
 
-// DiscordRecommendation representa uma recomendação para o frontend
+// DiscordRecommendation representa uma recomendaÃ§Ã£o para o frontend
 type DiscordRecommendation struct {
 	ID         string  `json:"id"`
 	Username   string  `json:"username"`
@@ -3275,7 +3425,7 @@ type DiscordRecommendation struct {
 	LikedByMe  bool    `json:"likedByMe"`
 }
 
-// DiscordStatus retorna o status da conexão Discord
+// DiscordStatus retorna o status da conexÃ£o Discord
 type DiscordStatus struct {
 	Connected   bool   `json:"connected"`
 	WebhookURL  string `json:"webhookUrl"`
@@ -3290,20 +3440,20 @@ func (a *App) GetDiscordStatus() DiscordStatus {
 	return DiscordStatus{
 		Connected:   bot.IsConnected(),
 		ServerName:  "GoAnime Community",
-		ChannelName: "#recomendações",
+		ChannelName: "#recomendaÃ§Ãµes",
 	}
 }
 
-// ConnectDiscord configura a conexão com Discord via webhook
+// ConnectDiscord configura a conexÃ£o com Discord via webhook
 func (a *App) ConnectDiscord(webhookURL string) error {
 	if webhookURL == "" {
-		return fmt.Errorf("webhook URL é obrigatório")
+		return fmt.Errorf("webhook URL Ã© obrigatÃ³rio")
 	}
 
 	bot := discord.GetBot()
 	bot.Configure(webhookURL)
 
-	// Carrega recomendações de exemplo para demonstração
+	// Carrega recomendaÃ§Ãµes de exemplo para demonstraÃ§Ã£o
 	if len(bot.GetRecommendations()) == 0 {
 		bot.AddMockRecommendations()
 	}
@@ -3319,7 +3469,7 @@ func (a *App) DisconnectDiscord() {
 	fmt.Println("[Discord] Desconectado")
 }
 
-// GetDiscordRecommendations retorna as recomendações do Discord
+// GetDiscordRecommendations retorna as recomendaÃ§Ãµes do Discord
 func (a *App) GetDiscordRecommendations() []DiscordRecommendation {
 	bot := discord.GetBot()
 	recs := bot.GetRecommendations()
@@ -3343,15 +3493,15 @@ func (a *App) GetDiscordRecommendations() []DiscordRecommendation {
 	return result
 }
 
-// SendDiscordRecommendation envia uma recomendação para o Discord
+// SendDiscordRecommendation envia uma recomendaÃ§Ã£o para o Discord
 func (a *App) SendDiscordRecommendation(animeTitle, animeImage string, animeScore float64, message string) error {
 	bot := discord.GetBot()
 
 	if !bot.IsConnected() {
-		return fmt.Errorf("Discord não está conectado")
+		return fmt.Errorf("discord não está conectado")
 	}
 
-	username := "Usuário"
+	username := "UsuÃ¡rio"
 	if a.User != nil && a.User.Username != "" {
 		username = a.User.Username
 	}
@@ -3370,43 +3520,43 @@ func (a *App) SendDiscordRecommendation(animeTitle, animeImage string, animeScor
 
 	err := bot.SendRecommendation(rec)
 	if err != nil {
-		fmt.Printf("[Discord] Erro ao enviar recomendação: %v\n", err)
+		fmt.Printf("[Discord] Erro ao enviar recomendaÃ§Ã£o: %v\n", err)
 		return err
 	}
 
-	fmt.Printf("[Discord] Recomendação enviada: %s\n", animeTitle)
+	fmt.Printf("[Discord] RecomendaÃ§Ã£o enviada: %s\n", animeTitle)
 	return nil
 }
 
-// LikeDiscordRecommendation adiciona um like a uma recomendação
+// LikeDiscordRecommendation adiciona um like a uma recomendaÃ§Ã£o
 func (a *App) LikeDiscordRecommendation(recID string) bool {
 	bot := discord.GetBot()
 	return bot.LikeRecommendation(recID)
 }
 
-// SimulateDiscordConnect simula conexão para demonstração (sem webhook real)
+// SimulateDiscordConnect simula conexÃ£o para demonstraÃ§Ã£o (sem webhook real)
 func (a *App) SimulateDiscordConnect() error {
 	bot := discord.GetBot()
 
 	// Configura como conectado (modo demo)
 	bot.Configure("demo")
 
-	// Carrega recomendações de exemplo
+	// Carrega recomendaÃ§Ãµes de exemplo
 	bot.AddMockRecommendations()
 
-	fmt.Println("[Discord] Modo demonstração ativado com recomendações de exemplo")
+	fmt.Println("[Discord] Modo demonstraÃ§Ã£o ativado com recomendaÃ§Ãµes de exemplo")
 	return nil
 }
 
-// DiscordOAuthConfig contém as configurações do OAuth2
+// DiscordOAuthConfig contÃ©m as configuraÃ§Ãµes do OAuth2
 type DiscordOAuthConfig struct {
 	ClientID     string
 	ClientSecret string
 	RedirectURI  string
 }
 
-// Configurações do aplicativo Discord OAuth2
-// Para o app funcionar, você precisa criar um aplicativo em https://discord.com/developers/applications
+// ConfiguraÃ§Ãµes do aplicativo Discord OAuth2
+// Para o app funcionar, vocÃª precisa criar um aplicativo em https://discord.com/developers/applications
 // e preencher as credenciais abaixo ou criar um arquivo discord_config.json
 var discordOAuth = DiscordOAuthConfig{
 	ClientID:     "", // Preencha com seu Client ID ou use discord_config.json
@@ -3416,7 +3566,7 @@ var discordOAuth = DiscordOAuthConfig{
 
 // InitDiscordOAuth inicializa as credenciais do Discord OAuth
 func initDiscordOAuth() {
-	// Tenta carregar do arquivo de configuração
+	// Tenta carregar do arquivo de configuraÃ§Ã£o
 	configPath := "discord_config.json"
 
 	// Verifica se o arquivo existe
@@ -3436,7 +3586,7 @@ func initDiscordOAuth() {
 		}
 	}
 
-	// Fallback para variáveis de ambiente
+	// Fallback para variÃ¡veis de ambiente
 	if discordOAuth.ClientID == "" {
 		if envID := os.Getenv("DISCORD_CLIENT_ID"); envID != "" {
 			discordOAuth.ClientID = envID
@@ -3454,7 +3604,7 @@ func initDiscordOAuth() {
 			discordOAuth.ClientID[:8],
 			discordOAuth.ClientID[len(discordOAuth.ClientID)-4:])
 	} else {
-		fmt.Println("[Discord] ⚠️ Credenciais não configuradas! Crie um arquivo discord_config.json")
+		fmt.Println("[Discord] âš ï¸ Credenciais nÃ£o configuradas! Crie um arquivo discord_config.json")
 	}
 }
 
@@ -3474,7 +3624,7 @@ func (a *App) SaveDiscordConfig(clientID, clientSecret string) error {
 		return err
 	}
 
-	// Atualiza as credenciais em memória
+	// Atualiza as credenciais em memÃ³ria
 	discordOAuth.ClientID = clientID
 	discordOAuth.ClientSecret = clientSecret
 
@@ -3482,7 +3632,7 @@ func (a *App) SaveDiscordConfig(clientID, clientSecret string) error {
 	return nil
 }
 
-// GetDiscordConfigStatus retorna o status da configuração do Discord
+// GetDiscordConfigStatus retorna o status da configuraÃ§Ã£o do Discord
 func (a *App) GetDiscordConfigStatus() map[string]interface{} {
 	return map[string]interface{}{
 		"configured":  discordOAuth.ClientID != "" && discordOAuth.ClientSecret != "",
@@ -3492,7 +3642,7 @@ func (a *App) GetDiscordConfigStatus() map[string]interface{} {
 	}
 }
 
-// DiscordUserInfo representa as informações do usuário para o frontend
+// DiscordUserInfo representa as informaÃ§Ãµes do usuÃ¡rio para o frontend
 type DiscordUserInfo struct {
 	ID        string `json:"id"`
 	Username  string `json:"username"`
@@ -3502,7 +3652,7 @@ type DiscordUserInfo struct {
 
 // GetDiscordOAuthURL retorna a URL para iniciar o fluxo OAuth2
 func (a *App) GetDiscordOAuthURL() string {
-	// Scopes necessários: identify para obter informações do usuário
+	// Scopes necessÃ¡rios: identify para obter informaÃ§Ãµes do usuÃ¡rio
 	scopes := "identify"
 
 	authURL := fmt.Sprintf(
@@ -3519,10 +3669,10 @@ func (a *App) GetDiscordOAuthURL() string {
 func (a *App) StartDiscordOAuth() error {
 	authURL := a.GetDiscordOAuthURL()
 
-	// Abre o navegador com a URL de autorização
+	// Abre o navegador com a URL de autorizaÃ§Ã£o
 	runtime.BrowserOpenURL(a.ctx, authURL)
 
-	fmt.Println("[Discord OAuth] Aguardando autorização do usuário...")
+	fmt.Println("[Discord OAuth] Aguardando autorizaÃ§Ã£o do usuÃ¡rio...")
 
 	// Inicia o servidor de callback em uma goroutine
 	go func() {
@@ -3535,15 +3685,15 @@ func (a *App) StartDiscordOAuth() error {
 			return
 		}
 
-		// Para funcionar sem client_secret, usamos o token implícito
-		// Ou buscamos o usuário diretamente com o código
+		// Para funcionar sem client_secret, usamos o token implÃ­cito
+		// Ou buscamos o usuÃ¡rio diretamente com o cÃ³digo
 		user, err := a.CompleteDiscordOAuthWithCode(code)
 		if err != nil {
 			fmt.Printf("[Discord OAuth] Erro ao completar OAuth: %v\n", err)
 			return
 		}
 
-		fmt.Printf("[Discord OAuth] Usuário conectado: %s\n", user.Username)
+		fmt.Printf("[Discord OAuth] UsuÃ¡rio conectado: %s\n", user.Username)
 
 		// Emite evento para o frontend
 		runtime.EventsEmit(a.ctx, "discord:connected", user)
@@ -3552,11 +3702,11 @@ func (a *App) StartDiscordOAuth() error {
 	return nil
 }
 
-// CompleteDiscordOAuthWithCode completa o fluxo OAuth2 usando o código
+// CompleteDiscordOAuthWithCode completa o fluxo OAuth2 usando o cÃ³digo
 func (a *App) CompleteDiscordOAuthWithCode(code string) (*DiscordUserInfo, error) {
 	bot := discord.GetBot()
 
-	// Se temos client_secret, troca o código por token
+	// Se temos client_secret, troca o cÃ³digo por token
 	if discordOAuth.ClientSecret != "" {
 		accessToken, err := bot.ExchangeCodeForToken(
 			discordOAuth.ClientID,
@@ -3565,17 +3715,17 @@ func (a *App) CompleteDiscordOAuthWithCode(code string) (*DiscordUserInfo, error
 			discordOAuth.RedirectURI,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("erro ao trocar código por token: %w", err)
+			return nil, fmt.Errorf("erro ao trocar cÃ³digo por token: %w", err)
 		}
 
 		user, err := bot.FetchUserFromToken(accessToken)
 		if err != nil {
-			return nil, fmt.Errorf("erro ao buscar usuário: %w", err)
+			return nil, fmt.Errorf("erro ao buscar usuÃ¡rio: %w", err)
 		}
 
 		bot.SetCurrentUser(user)
 
-		// Carrega recomendações de exemplo
+		// Carrega recomendaÃ§Ãµes de exemplo
 		if len(bot.GetRecommendations()) == 0 {
 			bot.AddMockRecommendations()
 		}
@@ -3588,8 +3738,8 @@ func (a *App) CompleteDiscordOAuthWithCode(code string) (*DiscordUserInfo, error
 		}, nil
 	}
 
-	// Modo sem client_secret: usamos o usuário simulado baseado no código
-	// Para produção, você deve ter o client_secret configurado
+	// Modo sem client_secret: usamos o usuÃ¡rio simulado baseado no cÃ³digo
+	// Para produÃ§Ã£o, vocÃª deve ter o client_secret configurado
 	fmt.Println("[Discord OAuth] Modo sem client_secret - usando perfil simulado")
 
 	mockUser := &discord.DiscordUser{
@@ -3601,7 +3751,7 @@ func (a *App) CompleteDiscordOAuthWithCode(code string) (*DiscordUserInfo, error
 
 	bot.SetCurrentUser(mockUser)
 
-	// Carrega recomendações de exemplo
+	// Carrega recomendaÃ§Ãµes de exemplo
 	if len(bot.GetRecommendations()) == 0 {
 		bot.AddMockRecommendations()
 	}
@@ -3614,7 +3764,7 @@ func (a *App) CompleteDiscordOAuthWithCode(code string) (*DiscordUserInfo, error
 	}, nil
 }
 
-// GetDiscordUser retorna o usuário Discord atualmente conectado
+// GetDiscordUser retorna o usuÃ¡rio Discord atualmente conectado
 func (a *App) GetDiscordUser() *DiscordUserInfo {
 	bot := discord.GetBot()
 	user := bot.GetCurrentUser()
@@ -3636,12 +3786,12 @@ func (a *App) GetDiscordUser() *DiscordUserInfo {
 	}
 }
 
-// DisconnectDiscordUser desconecta o usuário Discord OAuth
+// DisconnectDiscordUser desconecta o usuÃ¡rio Discord OAuth
 func (a *App) DisconnectDiscordUser() {
 	bot := discord.GetBot()
 	bot.Disconnect()
 	runtime.EventsEmit(a.ctx, "discord:disconnected", nil)
-	fmt.Println("[Discord] Usuário desconectado")
+	fmt.Println("[Discord] UsuÃ¡rio desconectado")
 }
 
 // SetDiscordClientSecret configura o client secret do OAuth2
@@ -3650,10 +3800,10 @@ func (a *App) SetDiscordClientSecret(secret string) {
 }
 
 // ============================================
-// DISCORD LINKING SYSTEM (Vinculação por Código)
+// DISCORD LINKING SYSTEM (VinculaÃ§Ã£o por CÃ³digo)
 // ============================================
 
-// DiscordLinkInfo representa informações da conta vinculada
+// DiscordLinkInfo representa informaÃ§Ãµes da conta vinculada
 type DiscordLinkInfo struct {
 	IsLinked    bool   `json:"isLinked"`
 	UserID      string `json:"userId"`
@@ -3675,7 +3825,7 @@ type DiscordFriendActivity struct {
 	IsOnline   bool   `json:"isOnline"`
 }
 
-// GetDiscordLinkStatus retorna o status da vinculação
+// GetDiscordLinkStatus retorna o status da vinculaÃ§Ã£o
 func (a *App) GetDiscordLinkStatus() DiscordLinkInfo {
 	ls := discord.GetLinkingSystem()
 	account := ls.GetLinkedAccount()
@@ -3695,7 +3845,7 @@ func (a *App) GetDiscordLinkStatus() DiscordLinkInfo {
 	}
 }
 
-// LinkDiscordWithCode vincula a conta Discord usando um código
+// LinkDiscordWithCode vincula a conta Discord usando um cÃ³digo
 func (a *App) LinkDiscordWithCode(code string) (DiscordLinkInfo, error) {
 	ls := discord.GetLinkingSystem()
 
@@ -3704,7 +3854,7 @@ func (a *App) LinkDiscordWithCode(code string) (DiscordLinkInfo, error) {
 		return DiscordLinkInfo{IsLinked: false}, err
 	}
 
-	// Emite evento de conexão
+	// Emite evento de conexÃ£o
 	runtime.EventsEmit(a.ctx, "discord:linked", map[string]string{
 		"username": account.Username,
 		"userId":   account.UserID,
@@ -3738,7 +3888,7 @@ func (a *App) GetDiscordServerInvite() string {
 	return discord.GetServerInviteLink()
 }
 
-// GenerateDiscordLinkCode gera um código de vinculação (para debug/teste)
+// GenerateDiscordLinkCode gera um cÃ³digo de vinculaÃ§Ã£o (para debug/teste)
 func (a *App) GenerateDiscordLinkCode() string {
 	return discord.GenerateLinkCode()
 }
@@ -3799,7 +3949,7 @@ func (a *App) SetDiscordShareAnimes(enabled bool) error {
 
 // ==================== MANGA METHODS ====================
 
-// MangaInfo representa um mangá para o frontend
+// MangaInfo representa um mangÃ¡ para o frontend
 type MangaInfo struct {
 	ID          string   `json:"id"`
 	Title       string   `json:"title"`
@@ -3809,10 +3959,10 @@ type MangaInfo struct {
 	Genres      []string `json:"genres"`
 	Description string   `json:"description"`
 	Status      string   `json:"status"`
-	Source      string   `json:"source"` // Fonte do mangá (mangalivre.to, mangalivre.blog)
+	Source      string   `json:"source"` // Fonte do mangÃ¡ (mangalivre.to, mangalivre.blog)
 }
 
-// MangaChapterInfo representa um capítulo para o frontend
+// MangaChapterInfo representa um capÃ­tulo para o frontend
 type MangaChapterInfo struct {
 	Number    string `json:"number"`
 	Title     string `json:"title"`
@@ -3822,7 +3972,7 @@ type MangaChapterInfo struct {
 	MangaName string `json:"mangaName"`
 }
 
-// MangaPageInfo representa uma página de mangá para o frontend
+// MangaPageInfo representa uma pÃ¡gina de mangÃ¡ para o frontend
 type MangaPageInfo struct {
 	Number int    `json:"number"`
 	URL    string `json:"url"`
@@ -3834,6 +3984,15 @@ type MangaSourceInfo struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	URL         string `json:"url"`
+}
+
+// AnimeSourceInfo representa informações sobre uma fonte de anime
+type AnimeSourceInfo struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Language    string `json:"language"` // "pt" ou "en"
+	Priority    int    `json:"priority"`
 }
 
 // getSourceFromMangaURL determina a fonte a partir da URL
@@ -3862,14 +4021,14 @@ func convertMangaToInfo(m manga.Manga, source string) MangaInfo {
 	}
 }
 
-// GetPopularMangas retorna os mangás populares (fonte padrão: mangalivre.to)
+// GetPopularMangas retorna os mangÃ¡s populares (fonte padrÃ£o: mangalivre.to)
 func (a *App) GetPopularMangas() []MangaInfo {
 	return a.GetPopularMangasFromSource("mangalivre.to")
 }
 
-// GetPopularMangasFromSource retorna os mangás populares de uma fonte específica
+// GetPopularMangasFromSource retorna os mangÃ¡s populares de uma fonte especÃ­fica
 func (a *App) GetPopularMangasFromSource(sourceName string) []MangaInfo {
-	fmt.Printf("[GetPopularMangasFromSource] Buscando mangás populares da fonte %s...\n", sourceName)
+	fmt.Printf("[GetPopularMangasFromSource] Buscando mangÃ¡s populares da fonte %s...\n", sourceName)
 
 	if a.mangaAggregator == nil {
 		a.mangaAggregator = manga.NewMangaAggregator()
@@ -3877,7 +4036,7 @@ func (a *App) GetPopularMangasFromSource(sourceName string) []MangaInfo {
 
 	source, ok := a.mangaAggregator.GetSource(sourceName)
 	if !ok {
-		fmt.Printf("[GetPopularMangasFromSource] Fonte não encontrada: %s\n", sourceName)
+		fmt.Printf("[GetPopularMangasFromSource] Fonte nÃ£o encontrada: %s\n", sourceName)
 		return []MangaInfo{}
 	}
 
@@ -3892,13 +4051,13 @@ func (a *App) GetPopularMangasFromSource(sourceName string) []MangaInfo {
 		result[i] = convertMangaToInfo(m, sourceName)
 	}
 
-	fmt.Printf("[GetPopularMangasFromSource] Retornando %d mangás da fonte %s\n", len(result), sourceName)
+	fmt.Printf("[GetPopularMangasFromSource] Retornando %d mangÃ¡s da fonte %s\n", len(result), sourceName)
 	return result
 }
 
-// GetPopularMangasAllSources retorna os mangás populares de TODAS as fontes combinadas
+// GetPopularMangasAllSources retorna os mangÃ¡s populares de TODAS as fontes combinadas
 func (a *App) GetPopularMangasAllSources() []MangaInfo {
-	fmt.Println("[GetPopularMangasAllSources] Buscando mangás populares de todas as fontes...")
+	fmt.Println("[GetPopularMangasAllSources] Buscando mangÃ¡s populares de todas as fontes...")
 
 	if a.mangaAggregator == nil {
 		a.mangaAggregator = manga.NewMangaAggregator()
@@ -3912,18 +4071,18 @@ func (a *App) GetPopularMangasAllSources() []MangaInfo {
 		allMangas = append(allMangas, mangas...)
 	}
 
-	fmt.Printf("[GetPopularMangasAllSources] Retornando %d mangás de todas as fontes\n", len(allMangas))
+	fmt.Printf("[GetPopularMangasAllSources] Retornando %d mangÃ¡s de todas as fontes\n", len(allMangas))
 	return allMangas
 }
 
-// GetLatestMangas retorna os mangás com atualizações recentes (fonte padrão: mangalivre.to)
+// GetLatestMangas retorna os mangÃ¡s com atualizaÃ§Ãµes recentes (fonte padrÃ£o: mangalivre.to)
 func (a *App) GetLatestMangas() []MangaInfo {
 	return a.GetLatestMangasFromSource("mangalivre.to")
 }
 
-// GetLatestMangasFromSource retorna os mangás com atualizações recentes de uma fonte específica
+// GetLatestMangasFromSource retorna os mangÃ¡s com atualizaÃ§Ãµes recentes de uma fonte especÃ­fica
 func (a *App) GetLatestMangasFromSource(sourceName string) []MangaInfo {
-	fmt.Printf("[GetLatestMangasFromSource] Buscando últimas atualizações da fonte %s...\n", sourceName)
+	fmt.Printf("[GetLatestMangasFromSource] Buscando Ãºltimas atualizaÃ§Ãµes da fonte %s...\n", sourceName)
 
 	if a.mangaAggregator == nil {
 		a.mangaAggregator = manga.NewMangaAggregator()
@@ -3931,7 +4090,7 @@ func (a *App) GetLatestMangasFromSource(sourceName string) []MangaInfo {
 
 	source, ok := a.mangaAggregator.GetSource(sourceName)
 	if !ok {
-		fmt.Printf("[GetLatestMangasFromSource] Fonte não encontrada: %s\n", sourceName)
+		fmt.Printf("[GetLatestMangasFromSource] Fonte nÃ£o encontrada: %s\n", sourceName)
 		return []MangaInfo{}
 	}
 
@@ -3946,16 +4105,16 @@ func (a *App) GetLatestMangasFromSource(sourceName string) []MangaInfo {
 		result[i] = convertMangaToInfo(m, sourceName)
 	}
 
-	fmt.Printf("[GetLatestMangasFromSource] Retornando %d mangás da fonte %s\n", len(result), sourceName)
+	fmt.Printf("[GetLatestMangasFromSource] Retornando %d mangÃ¡s da fonte %s\n", len(result), sourceName)
 	return result
 }
 
-// SearchMangas busca mangás por termo (fonte padrão: mangalivre.to)
+// SearchMangas busca mangÃ¡s por termo (fonte padrÃ£o: mangalivre.to)
 func (a *App) SearchMangas(query string) []MangaInfo {
 	return a.SearchMangasFromSource(query, "mangalivre.to")
 }
 
-// SearchMangasFromSource busca mangás por termo em uma fonte específica
+// SearchMangasFromSource busca mangÃ¡s por termo em uma fonte especÃ­fica
 func (a *App) SearchMangasFromSource(query string, sourceName string) []MangaInfo {
 	fmt.Printf("[SearchMangasFromSource] Buscando '%s' na fonte %s...\n", query, sourceName)
 
@@ -3965,7 +4124,7 @@ func (a *App) SearchMangasFromSource(query string, sourceName string) []MangaInf
 
 	source, ok := a.mangaAggregator.GetSource(sourceName)
 	if !ok {
-		fmt.Printf("[SearchMangasFromSource] Fonte não encontrada: %s\n", sourceName)
+		fmt.Printf("[SearchMangasFromSource] Fonte nÃ£o encontrada: %s\n", sourceName)
 		return []MangaInfo{}
 	}
 
@@ -3980,11 +4139,11 @@ func (a *App) SearchMangasFromSource(query string, sourceName string) []MangaInf
 		result[i] = convertMangaToInfo(m, sourceName)
 	}
 
-	fmt.Printf("[SearchMangasFromSource] Retornando %d mangás da fonte %s\n", len(result), sourceName)
+	fmt.Printf("[SearchMangasFromSource] Retornando %d mangÃ¡s da fonte %s\n", len(result), sourceName)
 	return result
 }
 
-// GetMangaDetails obtém detalhes completos de um mangá com cache
+// GetMangaDetails obtÃ©m detalhes completos de um mangÃ¡ com cache
 func (a *App) GetMangaDetails(mangaURL string) *MangaInfo {
 	fmt.Printf("[GetMangaDetails] Obtendo detalhes: %s\n", mangaURL)
 
@@ -4004,9 +4163,9 @@ func (a *App) GetMangaDetails(mangaURL string) *MangaInfo {
 	return &info
 }
 
-// GetMangaChapters obtém a lista de capítulos de um mangá (detecta fonte pela URL)
+// GetMangaChapters obtÃ©m a lista de capÃ­tulos de um mangÃ¡ (detecta fonte pela URL)
 func (a *App) GetMangaChapters(mangaURL string) []MangaChapterInfo {
-	fmt.Printf("[GetMangaChapters] Obtendo capítulos: %s\n", mangaURL)
+	fmt.Printf("[GetMangaChapters] Obtendo capÃ­tulos: %s\n", mangaURL)
 
 	if a.mangaAggregator == nil {
 		a.mangaAggregator = manga.NewMangaAggregator()
@@ -4030,19 +4189,19 @@ func (a *App) GetMangaChapters(mangaURL string) []MangaChapterInfo {
 		}
 	}
 
-	fmt.Printf("[GetMangaChapters] Retornando %d capítulos\n", len(result))
+	fmt.Printf("[GetMangaChapters] Retornando %d capÃ­tulos\n", len(result))
 	return result
 }
 
-// GetChapterPages obtém as páginas (imagens) de um capítulo (detecta fonte pela URL)
+// GetChapterPages obtÃ©m as pÃ¡ginas (imagens) de um capÃ­tulo (detecta fonte pela URL)
 func (a *App) GetChapterPages(chapterURL string) []MangaPageInfo {
-	fmt.Printf("[GetChapterPages] Obtendo páginas: %s\n", chapterURL)
+	fmt.Printf("[GetChapterPages] Obtendo pÃ¡ginas: %s\n", chapterURL)
 
 	if a.mangaAggregator == nil {
 		a.mangaAggregator = manga.NewMangaAggregator()
 	}
 
-	// Inicia proxy se não estiver rodando
+	// Inicia proxy se nÃ£o estiver rodando
 	if a.proxyPort == 0 {
 		a.startVideoProxy()
 	}
@@ -4076,25 +4235,25 @@ func (a *App) GetChapterPages(chapterURL string) []MangaPageInfo {
 		}
 	}
 
-	// Pré-carrega imagens em background para cache
+	// PrÃ©-carrega imagens em background para cache
 	go func() {
 		for _, p := range pages {
 			a.preloadMangaImage(p.URL, referer)
 		}
 	}()
 
-	fmt.Printf("[GetChapterPages] Retornando %d páginas via proxy\n", len(result))
+	fmt.Printf("[GetChapterPages] Retornando %d pÃ¡ginas via proxy\n", len(result))
 	return result
 }
 
-// preloadMangaImage pré-carrega uma imagem de mangá no cache
+// preloadMangaImage prÃ©-carrega uma imagem de mangÃ¡ no cache
 func (a *App) preloadMangaImage(imageURL, referer string) {
 	a.imageCacheMutex.RLock()
 	_, exists := a.imageCache[imageURL]
 	a.imageCacheMutex.RUnlock()
 
 	if exists {
-		return // Já está no cache
+		return // JÃ¡ estÃ¡ no cache
 	}
 
 	req, err := http.NewRequest("GET", imageURL, nil)
@@ -4122,9 +4281,9 @@ func (a *App) preloadMangaImage(imageURL, referer string) {
 	}
 }
 
-// GetMangasByGenre retorna mangás de um gênero específico
+// GetMangasByGenre retorna mangÃ¡s de um gÃªnero especÃ­fico
 func (a *App) GetMangasByGenre(genre string) []MangaInfo {
-	fmt.Printf("[GetMangasByGenre] Buscando gênero: %s\n", genre)
+	fmt.Printf("[GetMangasByGenre] Buscando gÃªnero: %s\n", genre)
 
 	if a.mangaClient == nil {
 		a.mangaClient = manga.NewMangaClient()
@@ -4148,20 +4307,20 @@ func (a *App) GetMangasByGenre(genre string) []MangaInfo {
 		}
 	}
 
-	fmt.Printf("[GetMangasByGenre] Retornando %d mangás\n", len(result))
+	fmt.Printf("[GetMangasByGenre] Retornando %d mangÃ¡s\n", len(result))
 	return result
 }
 
-// MangaListResult representa o resultado de listagem de mangás com paginação
+// MangaListResult representa o resultado de listagem de mangÃ¡s com paginaÃ§Ã£o
 type MangaListResult struct {
 	Mangas     []MangaInfo `json:"mangas"`
 	TotalPages int         `json:"totalPages"`
 	Page       int         `json:"page"`
 }
 
-// GetAllMangas retorna todos os mangás com paginação
+// GetAllMangas retorna todos os mangÃ¡s com paginaÃ§Ã£o
 func (a *App) GetAllMangas(page int) MangaListResult {
-	fmt.Printf("[GetAllMangas] Buscando página %d...\n", page)
+	fmt.Printf("[GetAllMangas] Buscando pÃ¡gina %d...\n", page)
 
 	if a.mangaClient == nil {
 		a.mangaClient = manga.NewMangaClient()
@@ -4185,13 +4344,13 @@ func (a *App) GetAllMangas(page int) MangaListResult {
 		}
 	}
 
-	fmt.Printf("[GetAllMangas] Página %d: Retornando %d mangás (total páginas: %d)\n", page, len(result), totalPages)
+	fmt.Printf("[GetAllMangas] PÃ¡gina %d: Retornando %d mangÃ¡s (total pÃ¡ginas: %d)\n", page, len(result), totalPages)
 	return MangaListResult{Mangas: result, TotalPages: totalPages, Page: page}
 }
 
-// GetAllMangasComplete busca TODOS os mangás de TODAS as fontes
+// GetAllMangasComplete busca TODOS os mangÃ¡s de TODAS as fontes
 func (a *App) GetAllMangasComplete() []MangaInfo {
-	fmt.Println("[GetAllMangasComplete] Buscando TODOS os mangás de todas as fontes (paralelo)...")
+	fmt.Println("[GetAllMangasComplete] Buscando TODOS os mangÃ¡s de todas as fontes (paralelo)...")
 
 	if a.mangaAggregator == nil {
 		a.mangaAggregator = manga.NewMangaAggregator()
@@ -4215,14 +4374,14 @@ func (a *App) GetAllMangasComplete() []MangaInfo {
 			var pageWg sync.WaitGroup
 			pageChan := make(chan []MangaInfo, 10)
 
-			// Busca até 10 páginas em paralelo
+			// Busca atÃ© 10 pÃ¡ginas em paralelo
 			for page := 1; page <= 10; page++ {
 				pageWg.Add(1)
 				go func(page int) {
 					defer pageWg.Done()
 					mangas, totalPages, err := source.GetAllMangas(page)
 					if err != nil {
-						fmt.Printf("[GetAllMangasComplete] Erro na fonte %s página %d: %v\n", sourceName, page, err)
+						fmt.Printf("[GetAllMangasComplete] Erro na fonte %s pÃ¡gina %d: %v\n", sourceName, page, err)
 						return
 					}
 					temp := []MangaInfo{}
@@ -4231,7 +4390,7 @@ func (a *App) GetAllMangasComplete() []MangaInfo {
 					}
 					pageChan <- temp
 					if page >= totalPages {
-						// Não busca mais páginas se chegou ao fim
+						// NÃ£o busca mais pÃ¡ginas se chegou ao fim
 						return
 					}
 				}(page)
@@ -4249,13 +4408,13 @@ func (a *App) GetAllMangasComplete() []MangaInfo {
 	}
 
 	wg.Wait()
-	fmt.Printf("[GetAllMangasComplete] TOTAL FINAL: %d mangás de todas as fontes\n", len(allMangas))
+	fmt.Printf("[GetAllMangasComplete] TOTAL FINAL: %d mangÃ¡s de todas as fontes\n", len(allMangas))
 	return allMangas
 }
 
-// GetAllMangasFromSourceComplete busca TODOS os mangás de UMA fonte específica
+// GetAllMangasFromSourceComplete busca TODOS os mangÃ¡s de UMA fonte especÃ­fica
 func (a *App) GetAllMangasFromSourceComplete(sourceName string) []MangaInfo {
-	fmt.Printf("[GetAllMangasFromSourceComplete] Buscando todos os mangás da fonte %s...\n", sourceName)
+	fmt.Printf("[GetAllMangasFromSourceComplete] Buscando todos os mangÃ¡s da fonte %s...\n", sourceName)
 
 	if a.mangaAggregator == nil {
 		a.mangaAggregator = manga.NewMangaAggregator()
@@ -4263,17 +4422,17 @@ func (a *App) GetAllMangasFromSourceComplete(sourceName string) []MangaInfo {
 
 	source, ok := a.mangaAggregator.GetSource(sourceName)
 	if !ok {
-		fmt.Printf("[GetAllMangasFromSourceComplete] Fonte não encontrada: %s\n", sourceName)
+		fmt.Printf("[GetAllMangasFromSourceComplete] Fonte nÃ£o encontrada: %s\n", sourceName)
 		return []MangaInfo{}
 	}
 
 	var allMangas []MangaInfo
 
-	// Busca todas as páginas
-	for page := 1; page <= 50; page++ { // Limite de 50 páginas
+	// Busca todas as pÃ¡ginas
+	for page := 1; page <= 50; page++ { // Limite de 50 pÃ¡ginas
 		mangas, totalPages, err := source.GetAllMangas(page)
 		if err != nil {
-			fmt.Printf("[GetAllMangasFromSourceComplete] Erro na página %d: %v\n", page, err)
+			fmt.Printf("[GetAllMangasFromSourceComplete] Erro na pÃ¡gina %d: %v\n", page, err)
 			break
 		}
 
@@ -4286,43 +4445,43 @@ func (a *App) GetAllMangasFromSourceComplete(sourceName string) []MangaInfo {
 		}
 	}
 
-	fmt.Printf("[GetAllMangasFromSourceComplete] Total: %d mangás da fonte %s\n", len(allMangas), sourceName)
+	fmt.Printf("[GetAllMangasFromSourceComplete] Total: %d mangÃ¡s da fonte %s\n", len(allMangas), sourceName)
 	return allMangas
 }
 
-// normalizeMangaTitle normaliza o título para comparação
+// normalizeMangaTitle normaliza o tÃ­tulo para comparaÃ§Ã£o
 func normalizeMangaTitle(title string) string {
-	// Remove caracteres especiais e converte para minúsculas
+	// Remove caracteres especiais e converte para minÃºsculas
 	title = strings.ToLower(title)
 	title = strings.TrimSpace(title)
 
 	// Remove caracteres especiais comuns
 	replacer := strings.NewReplacer(
-		":", "", "-", "", "–", "", "—", "",
+		":", "", "-", "", "â€“", "", "â€”", "",
 		"!", "", "?", "", ".", "", ",", "",
 		"'", "", "'", "", "\"", "",
 		"(", "", ")", "", "[", "", "]", "",
 	)
 	title = replacer.Replace(title)
 
-	// Remove espaços extras
+	// Remove espaÃ§os extras
 	title = strings.Join(strings.Fields(title), " ")
 
 	return title
 }
 
-// extractChapterCount extrai o número de capítulos do latestChapter
+// extractChapterCount extrai o nÃºmero de capÃ­tulos do latestChapter
 func extractChapterCount(latestChap string) int {
 	if latestChap == "" {
 		return 0
 	}
 
-	// Tenta extrair número do formato "Cap. 123" ou "Capítulo 123" etc
+	// Tenta extrair nÃºmero do formato "Cap. 123" ou "CapÃ­tulo 123" etc
 	re := regexp.MustCompile(`\d+`)
 	matches := re.FindAllString(latestChap, -1)
 
 	if len(matches) > 0 {
-		// Pega o maior número encontrado
+		// Pega o maior nÃºmero encontrado
 		maxNum := 0
 		for _, m := range matches {
 			if num, err := strconv.Atoi(m); err == nil && num > maxNum {
@@ -4334,9 +4493,9 @@ func extractChapterCount(latestChap string) int {
 	return 0
 }
 
-// GetMergedMangas retorna mangás de todas as fontes, mesclando duplicatas e escolhendo a com mais capítulos
+// GetMergedMangas retorna mangÃ¡s de todas as fontes, mesclando duplicatas e escolhendo a com mais capÃ­tulos
 func (a *App) GetMergedMangas(limit int) []MangaInfo {
-	fmt.Printf("[GetMergedMangas] Buscando e mesclando mangás de todas as fontes (limite: %d)...\n", limit)
+	fmt.Printf("[GetMergedMangas] Buscando e mesclando mangÃ¡s de todas as fontes (limite: %d)...\n", limit)
 
 	if a.mangaAggregator == nil {
 		a.mangaAggregator = manga.NewMangaAggregator()
@@ -4344,7 +4503,7 @@ func (a *App) GetMergedMangas(limit int) []MangaInfo {
 
 	sources := a.mangaAggregator.GetSources()
 
-	// Mapa para armazenar mangás por título normalizado
+	// Mapa para armazenar mangÃ¡s por tÃ­tulo normalizado
 	mangaMap := make(map[string]MangaInfo)
 
 	for _, sourceName := range sources {
@@ -4353,7 +4512,7 @@ func (a *App) GetMergedMangas(limit int) []MangaInfo {
 			continue
 		}
 
-		// Busca populares e últimos de cada fonte
+		// Busca populares e Ãºltimos de cada fonte
 		populares, _ := source.GetPopularMangas()
 		ultimos, _ := source.GetLatestUpdates()
 
@@ -4364,13 +4523,13 @@ func (a *App) GetMergedMangas(limit int) []MangaInfo {
 			info := convertMangaToInfo(m, sourceName)
 			normalizedTitle := normalizeMangaTitle(info.Title)
 
-			// Verifica se já existe
+			// Verifica se jÃ¡ existe
 			if existing, exists := mangaMap[normalizedTitle]; exists {
-				// Compara quantidade de capítulos
+				// Compara quantidade de capÃ­tulos
 				existingChapters := extractChapterCount(existing.LatestChap)
 				newChapters := extractChapterCount(info.LatestChap)
 
-				// Escolhe o que tem mais capítulos
+				// Escolhe o que tem mais capÃ­tulos
 				if newChapters > existingChapters {
 					mangaMap[normalizedTitle] = info
 					fmt.Printf("[GetMergedMangas] '%s': %s (%d caps) > %s (%d caps)\n",
@@ -4385,13 +4544,13 @@ func (a *App) GetMergedMangas(limit int) []MangaInfo {
 	// Converte mapa para slice
 	var result []MangaInfo
 	for _, m := range mangaMap {
-		// Filtra conteúdo adulto
+		// Filtra conteÃºdo adulto
 		if !isAdultManga(m.Genres) {
 			result = append(result, m)
 		}
 	}
 
-	// Ordena por número de capítulos (mais capítulos primeiro)
+	// Ordena por nÃºmero de capÃ­tulos (mais capÃ­tulos primeiro)
 	sort.Slice(result, func(i, j int) bool {
 		return extractChapterCount(result[i].LatestChap) > extractChapterCount(result[j].LatestChap)
 	})
@@ -4401,13 +4560,13 @@ func (a *App) GetMergedMangas(limit int) []MangaInfo {
 		result = result[:limit]
 	}
 
-	fmt.Printf("[GetMergedMangas] Retornando %d mangás mesclados\n", len(result))
+	fmt.Printf("[GetMergedMangas] Retornando %d mangÃ¡s mesclados\n", len(result))
 	return result
 }
 
-// GetMergedMangasComplete retorna TODOS os mangás mesclados de todas as fontes
+// GetMergedMangasComplete retorna TODOS os mangÃ¡s mesclados de todas as fontes
 func (a *App) GetMergedMangasComplete() []MangaInfo {
-	fmt.Println("[GetMergedMangasComplete] Buscando e mesclando TODOS os mangás...")
+	fmt.Println("[GetMergedMangasComplete] Buscando e mesclando TODOS os mangÃ¡s...")
 
 	if a.mangaAggregator == nil {
 		a.mangaAggregator = manga.NewMangaAggregator()
@@ -4415,7 +4574,7 @@ func (a *App) GetMergedMangasComplete() []MangaInfo {
 
 	sources := a.mangaAggregator.GetSources()
 
-	// Mapa para armazenar mangás por título normalizado
+	// Mapa para armazenar mangÃ¡s por tÃ­tulo normalizado
 	mangaMap := make(map[string]MangaInfo)
 
 	for _, sourceName := range sources {
@@ -4424,7 +4583,7 @@ func (a *App) GetMergedMangasComplete() []MangaInfo {
 			continue
 		}
 
-		// Busca todas as páginas (limite de 20 por fonte para performance)
+		// Busca todas as pÃ¡ginas (limite de 20 por fonte para performance)
 		for page := 1; page <= 20; page++ {
 			mangas, totalPages, err := source.GetAllMangas(page)
 			if err != nil {
@@ -4459,21 +4618,21 @@ func (a *App) GetMergedMangasComplete() []MangaInfo {
 		result = append(result, m)
 	}
 
-	// Ordena por capítulos
+	// Ordena por capÃ­tulos
 	sort.Slice(result, func(i, j int) bool {
 		return extractChapterCount(result[i].LatestChap) > extractChapterCount(result[j].LatestChap)
 	})
 
-	fmt.Printf("[GetMergedMangasComplete] Retornando %d mangás mesclados\n", len(result))
+	fmt.Printf("[GetMergedMangasComplete] Retornando %d mangÃ¡s mesclados\n", len(result))
 	return result
 }
 
-// adultGenres são os gêneros considerados conteúdo adulto (+18) - APENAS HENTAI
+// adultGenres sÃ£o os gÃªneros considerados conteÃºdo adulto (+18) - APENAS HENTAI
 var adultGenres = []string{
-	"hentai", "+18", "r18", "r-18", "sexo explicito", "sexo explícito",
+	"hentai", "+18", "r18", "r-18", "sexo explicito", "sexo explÃ­cito",
 }
 
-// isAdultManga verifica se um mangá contém gêneros adultos (hentai)
+// isAdultManga verifica se um mangÃ¡ contÃ©m gÃªneros adultos (hentai)
 func isAdultManga(genres []string) bool {
 	for _, g := range genres {
 		genreLower := strings.ToLower(strings.TrimSpace(g))
@@ -4486,9 +4645,9 @@ func isAdultManga(genres []string) bool {
 	return false
 }
 
-// GetPopularMangasSafe retorna mangás populares SEM conteúdo adulto
+// GetPopularMangasSafe retorna mangÃ¡s populares SEM conteÃºdo adulto
 func (a *App) GetPopularMangasSafe() []MangaInfo {
-	fmt.Println("[GetPopularMangasSafe] Buscando mangás populares (SFW)...")
+	fmt.Println("[GetPopularMangasSafe] Buscando mangÃ¡s populares (SFW)...")
 
 	allMangas := a.GetPopularMangas()
 	var safeMangas []MangaInfo
@@ -4499,13 +4658,13 @@ func (a *App) GetPopularMangasSafe() []MangaInfo {
 		}
 	}
 
-	fmt.Printf("[GetPopularMangasSafe] Retornando %d mangás seguros de %d total\n", len(safeMangas), len(allMangas))
+	fmt.Printf("[GetPopularMangasSafe] Retornando %d mangÃ¡s seguros de %d total\n", len(safeMangas), len(allMangas))
 	return safeMangas
 }
 
-// GetPopularMangasAdult retorna APENAS mangás populares com conteúdo adulto
+// GetPopularMangasAdult retorna APENAS mangÃ¡s populares com conteÃºdo adulto
 func (a *App) GetPopularMangasAdult() []MangaInfo {
-	fmt.Println("[GetPopularMangasAdult] Buscando mangás adultos (+18)...")
+	fmt.Println("[GetPopularMangasAdult] Buscando mangÃ¡s adultos (+18)...")
 
 	allMangas := a.GetPopularMangas()
 	var adultMangas []MangaInfo
@@ -4516,13 +4675,13 @@ func (a *App) GetPopularMangasAdult() []MangaInfo {
 		}
 	}
 
-	fmt.Printf("[GetPopularMangasAdult] Retornando %d mangás adultos de %d total\n", len(adultMangas), len(allMangas))
+	fmt.Printf("[GetPopularMangasAdult] Retornando %d mangÃ¡s adultos de %d total\n", len(adultMangas), len(allMangas))
 	return adultMangas
 }
 
-// GetAllMangasSafe retorna TODOS os mangás SEM conteúdo adulto
+// GetAllMangasSafe retorna TODOS os mangÃ¡s SEM conteÃºdo adulto
 func (a *App) GetAllMangasSafe() []MangaInfo {
-	fmt.Println("[GetAllMangasSafe] Buscando todos os mangás (SFW)...")
+	fmt.Println("[GetAllMangasSafe] Buscando todos os mangÃ¡s (SFW)...")
 
 	allMangas := a.GetAllMangasComplete()
 	var safeMangas []MangaInfo
@@ -4533,13 +4692,13 @@ func (a *App) GetAllMangasSafe() []MangaInfo {
 		}
 	}
 
-	fmt.Printf("[GetAllMangasSafe] Retornando %d mangás seguros de %d total\n", len(safeMangas), len(allMangas))
+	fmt.Printf("[GetAllMangasSafe] Retornando %d mangÃ¡s seguros de %d total\n", len(safeMangas), len(allMangas))
 	return safeMangas
 }
 
-// GetAllMangasAdult retorna APENAS mangás com conteúdo adulto
+// GetAllMangasAdult retorna APENAS mangÃ¡s com conteÃºdo adulto
 func (a *App) GetAllMangasAdult() []MangaInfo {
-	fmt.Println("[GetAllMangasAdult] Buscando mangás adultos (+18)...")
+	fmt.Println("[GetAllMangasAdult] Buscando mangÃ¡s adultos (+18)...")
 
 	allMangas := a.GetAllMangasComplete()
 	var adultMangas []MangaInfo
@@ -4550,22 +4709,22 @@ func (a *App) GetAllMangasAdult() []MangaInfo {
 		}
 	}
 
-	fmt.Printf("[GetAllMangasAdult] Retornando %d mangás adultos de %d total\n", len(adultMangas), len(allMangas))
+	fmt.Printf("[GetAllMangasAdult] Retornando %d mangÃ¡s adultos de %d total\n", len(adultMangas), len(allMangas))
 	return adultMangas
 }
 
-// GetFeaturedMangas retorna mangás em destaque de TODAS as fontes (populares + últimas atualizações, sem +18)
+// GetFeaturedMangas retorna mangÃ¡s em destaque de TODAS as fontes (populares + Ãºltimas atualizaÃ§Ãµes, sem +18)
 func (a *App) GetFeaturedMangas(limit int) []MangaInfo {
 	return a.GetFeaturedMangasFromSource(limit, "")
 }
 
-// GetFeaturedMangasFromSource retorna mangás em destaque de uma fonte específica
+// GetFeaturedMangasFromSource retorna mangÃ¡s em destaque de uma fonte especÃ­fica
 // Se sourceName for vazio, busca de todas as fontes
 func (a *App) GetFeaturedMangasFromSource(limit int, sourceName string) []MangaInfo {
-	fmt.Printf("[GetFeaturedMangasFromSource] Buscando %d mangás em destaque (fonte: %s)...\n", limit, sourceName)
+	fmt.Printf("[GetFeaturedMangasFromSource] Buscando %d mangÃ¡s em destaque (fonte: %s)...\n", limit, sourceName)
 
 	if limit <= 0 {
-		limit = 24 // Padrão: 24 mangás
+		limit = 24 // PadrÃ£o: 24 mangÃ¡s
 	}
 
 	var populares []MangaInfo
@@ -4574,11 +4733,11 @@ func (a *App) GetFeaturedMangasFromSource(limit int, sourceName string) []MangaI
 		// Busca de todas as fontes
 		populares = a.GetPopularMangasAllSources()
 	} else {
-		// Busca de uma fonte específica
+		// Busca de uma fonte especÃ­fica
 		populares = a.GetPopularMangasFromSource(sourceName)
 	}
 
-	// Filtra conteúdo adulto
+	// Filtra conteÃºdo adulto
 	var safePopulares []MangaInfo
 	for _, m := range populares {
 		if !isAdultManga(m.Genres) {
@@ -4586,15 +4745,15 @@ func (a *App) GetFeaturedMangasFromSource(limit int, sourceName string) []MangaI
 		}
 	}
 
-	// Se tiver mangás suficientes, retorna
+	// Se tiver mangÃ¡s suficientes, retorna
 	if len(safePopulares) >= limit {
 		return safePopulares[:limit]
 	}
 
-	// Senão, completa com os últimos updates
+	// SenÃ£o, completa com os Ãºltimos updates
 	var latests []MangaInfo
 	if sourceName == "" || sourceName == "all" {
-		// Busca últimos de todas as fontes
+		// Busca Ãºltimos de todas as fontes
 		if a.mangaAggregator == nil {
 			a.mangaAggregator = manga.NewMangaAggregator()
 		}
@@ -4614,7 +4773,7 @@ func (a *App) GetFeaturedMangasFromSource(limit int, sourceName string) []MangaI
 		seen[m.URL] = true
 	}
 
-	// Adiciona os últimos que não são duplicados e não são adultos
+	// Adiciona os Ãºltimos que nÃ£o sÃ£o duplicados e nÃ£o sÃ£o adultos
 	for _, m := range latests {
 		if !seen[m.URL] && !isAdultManga(m.Genres) {
 			safePopulares = append(safePopulares, m)
@@ -4624,13 +4783,13 @@ func (a *App) GetFeaturedMangasFromSource(limit int, sourceName string) []MangaI
 		}
 	}
 
-	fmt.Printf("[GetFeaturedMangasFromSource] Retornando %d mangás em destaque\n", len(safePopulares))
+	fmt.Printf("[GetFeaturedMangasFromSource] Retornando %d mangÃ¡s em destaque\n", len(safePopulares))
 	return safePopulares
 }
 
-// GetMangaGenres retorna a lista de gêneros disponíveis
+// GetMangaGenres retorna a lista de gÃªneros disponÃ­veis
 func (a *App) GetMangaGenres() []string {
-	fmt.Println("[GetMangaGenres] Buscando gêneros...")
+	fmt.Println("[GetMangaGenres] Buscando gÃªneros...")
 
 	if a.mangaClient == nil {
 		a.mangaClient = manga.NewMangaClient()
@@ -4642,13 +4801,13 @@ func (a *App) GetMangaGenres() []string {
 		return []string{}
 	}
 
-	fmt.Printf("[GetMangaGenres] Retornando %d gêneros\n", len(genres))
+	fmt.Printf("[GetMangaGenres] Retornando %d gÃªneros\n", len(genres))
 	return genres
 }
 
-// ============== FUNÇÕES DE MÚLTIPLAS FONTES DE MANGÁ ==============
+// ============== FUNÃ‡Ã•ES DE MÃšLTIPLAS FONTES DE MANGÃ ==============
 
-// GetMangaSourcesInfo retorna informações detalhadas sobre as fontes disponíveis
+// GetMangaSourcesInfo retorna informaÃ§Ãµes detalhadas sobre as fontes disponÃ­veis
 func (a *App) GetMangaSourcesInfo() []MangaSourceInfo {
 	sources := a.GetMangaSources()
 	result := make([]MangaSourceInfo, len(sources))
@@ -4659,21 +4818,21 @@ func (a *App) GetMangaSourcesInfo() []MangaSourceInfo {
 			result[i] = MangaSourceInfo{
 				ID:          s,
 				Name:        "MangaLivre.to",
-				Description: "Fonte principal com grande acervo de mangás em português",
+				Description: "Fonte principal com grande acervo de mangÃ¡s em portuguÃªs",
 				URL:         "https://mangalivre.to",
 			}
 		case "mangalivre.blog":
 			result[i] = MangaSourceInfo{
 				ID:          s,
 				Name:        "MangaLivre.blog",
-				Description: "Fonte alternativa com mangás atualizados frequentemente",
+				Description: "Fonte alternativa com mangÃ¡s atualizados frequentemente",
 				URL:         "https://mangalivre.blog",
 			}
 		default:
 			result[i] = MangaSourceInfo{
 				ID:          s,
 				Name:        s,
-				Description: "Fonte de mangás",
+				Description: "Fonte de mangÃ¡s",
 				URL:         "",
 			}
 		}
@@ -4690,9 +4849,44 @@ func (a *App) GetMangaSources() []string {
 	return a.mangaAggregator.GetSources()
 }
 
-// GetMangasFromSource busca mangás de uma fonte específica
+// ============== FUNÇÕES DE MÚLTIPLAS FONTES DE ANIME ==============
+
+// GetAnimeSourcesInfo retorna informações detalhadas sobre as fontes de anime disponíveis
+func (a *App) GetAnimeSourcesInfo() []AnimeSourceInfo {
+	sources := []AnimeSourceInfo{
+		{
+			ID:          "enime",
+			Name:        "Enime",
+			Description: "Fonte rápida com animes legendados em inglês",
+			Language:    "en",
+			Priority:    1,
+		},
+		{
+			ID:          "consumet",
+			Name:        "Consumet",
+			Description: "Fonte confiável com grande acervo",
+			Language:    "en",
+			Priority:    2,
+		},
+		{
+			ID:          "torbox",
+			Name:        "TorBox",
+			Description: "Streaming via torrents em alta qualidade (requer API key)",
+			Language:    "multi",
+			Priority:    3,
+		},
+	}
+	return sources
+}
+
+// GetAnimeSources retorna a lista de IDs das fontes de anime disponíveis
+func (a *App) GetAnimeSources() []string {
+	return []string{"enime", "consumet", "torbox"}
+}
+
+// GetMangasFromSource busca mangÃ¡s de uma fonte especÃ­fica
 func (a *App) GetMangasFromSource(sourceName string, page int) MangaListResult {
-	fmt.Printf("[GetMangasFromSource] Buscando página %d da fonte %s...\n", page, sourceName)
+	fmt.Printf("[GetMangasFromSource] Buscando pÃ¡gina %d da fonte %s...\n", page, sourceName)
 
 	if a.mangaAggregator == nil {
 		a.mangaAggregator = manga.NewMangaAggregator()
@@ -4716,13 +4910,13 @@ func (a *App) GetMangasFromSource(sourceName string, page int) MangaListResult {
 		}
 	}
 
-	fmt.Printf("[GetMangasFromSource] Fonte %s, Página %d: %d mangás\n", sourceName, page, len(result))
+	fmt.Printf("[GetMangasFromSource] Fonte %s, PÃ¡gina %d: %d mangÃ¡s\n", sourceName, page, len(result))
 	return MangaListResult{Mangas: result, TotalPages: totalPages, Page: page}
 }
 
-// GetMangasFromAllSources busca mangás de todas as fontes combinadas
+// GetMangasFromAllSources busca mangÃ¡s de todas as fontes combinadas
 func (a *App) GetMangasFromAllSources(page int) MangaListResult {
-	fmt.Printf("[GetMangasFromAllSources] Buscando página %d de todas as fontes...\n", page)
+	fmt.Printf("[GetMangasFromAllSources] Buscando pÃ¡gina %d de todas as fontes...\n", page)
 
 	if a.mangaAggregator == nil {
 		a.mangaAggregator = manga.NewMangaAggregator()
@@ -4746,11 +4940,11 @@ func (a *App) GetMangasFromAllSources(page int) MangaListResult {
 		}
 	}
 
-	fmt.Printf("[GetMangasFromAllSources] Página %d: %d mangás de todas as fontes\n", page, len(result))
+	fmt.Printf("[GetMangasFromAllSources] PÃ¡gina %d: %d mangÃ¡s de todas as fontes\n", page, len(result))
 	return MangaListResult{Mangas: result, TotalPages: totalPages, Page: page}
 }
 
-// SearchMangasAllSources busca mangás em todas as fontes
+// SearchMangasAllSources busca mangÃ¡s em todas as fontes
 func (a *App) SearchMangasAllSources(query string) []MangaInfo {
 	fmt.Printf("[SearchMangasAllSources] Buscando '%s' em todas as fontes...\n", query)
 
@@ -4776,11 +4970,11 @@ func (a *App) SearchMangasAllSources(query string) []MangaInfo {
 		}
 	}
 
-	fmt.Printf("[SearchMangasAllSources] Encontrados %d mangás\n", len(result))
+	fmt.Printf("[SearchMangasAllSources] Encontrados %d mangÃ¡s\n", len(result))
 	return result
 }
 
-// GetMangaDetailsAuto obtém detalhes de um mangá (detecta fonte pela URL automaticamente)
+// GetMangaDetailsAuto obtÃ©m detalhes de um mangÃ¡ (detecta fonte pela URL automaticamente)
 func (a *App) GetMangaDetailsAuto(mangaURL string) *MangaInfo {
 	fmt.Printf("[GetMangaDetailsAuto] Obtendo detalhes: %s\n", mangaURL)
 
@@ -4805,9 +4999,9 @@ func (a *App) GetMangaDetailsAuto(mangaURL string) *MangaInfo {
 	}
 }
 
-// GetMangaChaptersAuto obtém capítulos de um mangá (detecta fonte pela URL automaticamente)
+// GetMangaChaptersAuto obtÃ©m capÃ­tulos de um mangÃ¡ (detecta fonte pela URL automaticamente)
 func (a *App) GetMangaChaptersAuto(mangaURL string) []MangaChapterInfo {
-	fmt.Printf("[GetMangaChaptersAuto] Obtendo capítulos: %s\n", mangaURL)
+	fmt.Printf("[GetMangaChaptersAuto] Obtendo capÃ­tulos: %s\n", mangaURL)
 
 	if a.mangaAggregator == nil {
 		a.mangaAggregator = manga.NewMangaAggregator()
@@ -4831,19 +5025,19 @@ func (a *App) GetMangaChaptersAuto(mangaURL string) []MangaChapterInfo {
 		}
 	}
 
-	fmt.Printf("[GetMangaChaptersAuto] Retornando %d capítulos\n", len(result))
+	fmt.Printf("[GetMangaChaptersAuto] Retornando %d capÃ­tulos\n", len(result))
 	return result
 }
 
-// GetChapterPagesAuto obtém páginas de um capítulo (detecta fonte pela URL automaticamente)
+// GetChapterPagesAuto obtÃ©m pÃ¡ginas de um capÃ­tulo (detecta fonte pela URL automaticamente)
 func (a *App) GetChapterPagesAuto(chapterURL string) []MangaPageInfo {
-	fmt.Printf("[GetChapterPagesAuto] Obtendo páginas: %s\n", chapterURL)
+	fmt.Printf("[GetChapterPagesAuto] Obtendo pÃ¡ginas: %s\n", chapterURL)
 
 	if a.mangaAggregator == nil {
 		a.mangaAggregator = manga.NewMangaAggregator()
 	}
 
-	// Inicia proxy se não estiver rodando
+	// Inicia proxy se nÃ£o estiver rodando
 	if a.proxyPort == 0 {
 		a.startVideoProxy()
 	}
@@ -4876,46 +5070,46 @@ func (a *App) GetChapterPagesAuto(chapterURL string) []MangaPageInfo {
 		}
 	}
 
-	// Pré-carrega imagens em background para cache
+	// PrÃ©-carrega imagens em background para cache
 	go func() {
 		for _, p := range pages {
 			a.preloadMangaImage(p.URL, referer)
 		}
 	}()
 
-	fmt.Printf("[GetChapterPagesAuto] Retornando %d páginas via proxy\n", len(result))
+	fmt.Printf("[GetChapterPagesAuto] Retornando %d pÃ¡ginas via proxy\n", len(result))
 	return result
 }
 
-// GetMergedMangasWithBestSource busca mangás de todas as fontes e mescla inteligentemente
-// escolhendo a versão que tem mais capítulos quando há duplicatas
+// GetMergedMangasWithBestSource busca mangÃ¡s de todas as fontes e mescla inteligentemente
+// escolhendo a versÃ£o que tem mais capÃ­tulos quando hÃ¡ duplicatas
 func (a *App) GetMergedMangasWithBestSource() []MangaInfo {
 	fmt.Println("[GetMergedMangasWithBestSource] Iniciando merge inteligente de todas as fontes...")
 
-	// Inicializa o aggregator se necessário
+	// Inicializa o aggregator se necessÃ¡rio
 	if a.mangaAggregator == nil {
 		a.mangaAggregator = manga.NewMangaAggregator()
 	}
 
-	// Função para normalizar títulos para comparação
+	// FunÃ§Ã£o para normalizar tÃ­tulos para comparaÃ§Ã£o
 	normalizeTitleForComparison := func(title string) string {
-		// Remove caracteres especiais e converte para minúsculas
+		// Remove caracteres especiais e converte para minÃºsculas
 		title = strings.ToLower(title)
 		reg := regexp.MustCompile(`[^a-z0-9\s]`)
 		title = reg.ReplaceAllString(title, "")
 		title = strings.TrimSpace(title)
-		// Remove espaços extras
+		// Remove espaÃ§os extras
 		reg = regexp.MustCompile(`\s+`)
 		title = reg.ReplaceAllString(title, " ")
 		return title
 	}
 
-	// Função para extrair número de capítulos do campo LatestChap
+	// FunÃ§Ã£o para extrair nÃºmero de capÃ­tulos do campo LatestChap
 	extractChapterCount := func(latestChap string) int {
 		if latestChap == "" {
 			return 0
 		}
-		// Tenta extrair número do formato "Cap. XXX" ou "Capítulo XXX"
+		// Tenta extrair nÃºmero do formato "Cap. XXX" ou "CapÃ­tulo XXX"
 		reg := regexp.MustCompile(`(\d+)`)
 		matches := reg.FindStringSubmatch(latestChap)
 		if len(matches) > 1 {
@@ -4927,7 +5121,7 @@ func (a *App) GetMergedMangasWithBestSource() []MangaInfo {
 		return 0
 	}
 
-	// Mapa para armazenar o melhor mangá por título normalizado
+	// Mapa para armazenar o melhor mangÃ¡ por tÃ­tulo normalizado
 	bestMangaByTitle := make(map[string]MangaInfo)
 
 	// Busca de cada fonte
@@ -4937,16 +5131,16 @@ func (a *App) GetMergedMangasWithBestSource() []MangaInfo {
 
 		source, ok := a.mangaAggregator.GetSource(sourceName)
 		if !ok {
-			fmt.Printf("[GetMergedMangasWithBestSource] Fonte não encontrada: %s\n", sourceName)
+			fmt.Printf("[GetMergedMangasWithBestSource] Fonte nÃ£o encontrada: %s\n", sourceName)
 			continue
 		}
 
-		// Busca todos os mangás (página por página)
+		// Busca todos os mangÃ¡s (pÃ¡gina por pÃ¡gina)
 		page := 1
 		for {
 			mangas, totalPages, err := source.GetAllMangas(page)
 			if err != nil {
-				fmt.Printf("[GetMergedMangasWithBestSource] Erro na fonte %s página %d: %v\n", sourceName, page, err)
+				fmt.Printf("[GetMergedMangasWithBestSource] Erro na fonte %s pÃ¡gina %d: %v\n", sourceName, page, err)
 				break
 			}
 
@@ -4955,7 +5149,7 @@ func (a *App) GetMergedMangasWithBestSource() []MangaInfo {
 				normalizedTitle := normalizeTitleForComparison(info.Title)
 
 				if existing, exists := bestMangaByTitle[normalizedTitle]; exists {
-					// Compara número de capítulos
+					// Compara nÃºmero de capÃ­tulos
 					existingChapters := extractChapterCount(existing.LatestChap)
 					newChapters := extractChapterCount(info.LatestChap)
 
@@ -4982,11 +5176,11 @@ func (a *App) GetMergedMangasWithBestSource() []MangaInfo {
 		result = append(result, manga)
 	}
 
-	// Ordena por título
+	// Ordena por tÃ­tulo
 	sort.Slice(result, func(i, j int) bool {
 		return strings.ToLower(result[i].Title) < strings.ToLower(result[j].Title)
 	})
 
-	fmt.Printf("[GetMergedMangasWithBestSource] Total após merge: %d mangás únicos\n", len(result))
+	fmt.Printf("[GetMergedMangasWithBestSource] Total apÃ³s merge: %d mangÃ¡s Ãºnicos\n", len(result))
 	return result
 }

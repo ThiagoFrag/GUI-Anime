@@ -3,7 +3,7 @@ package store
 import (
 	"encoding/json"
 	"os"
-    // ATENÇÃO: NÃO ADICIONE NENHUM OUTRO IMPORT AQUI
+	// ATENÇÃO: NÃO ADICIONE NENHUM OUTRO IMPORT AQUI
 )
 
 // SavedAnime é a estrutura pública (com letra Maiúscula)
@@ -28,11 +28,13 @@ func LoadUser() *UserData {
 		return nil
 	}
 	var user UserData
-	json.Unmarshal(data, &user)
+	if err := json.Unmarshal(data, &user); err != nil {
+		return nil
+	}
 	return &user
 }
 
 func SaveUser(user *UserData) error {
 	data, _ := json.MarshalIndent(user, "", "  ")
-	return os.WriteFile(dbFile, data, 0644)
+	return os.WriteFile(dbFile, data, 0600)
 }

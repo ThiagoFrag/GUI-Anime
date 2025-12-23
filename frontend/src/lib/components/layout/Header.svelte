@@ -4,7 +4,7 @@
      * Exibe logo, título e menu do usuário
      */
     
-    /** @type {{ user: Object, minimal?: boolean, onHome?: Function, onFavorites?: Function, onHistory?: Function, onSettings?: Function }} */
+    /** @type {{ user: Object, minimal?: boolean, onHome?: () => void, onFavorites?: () => void, onHistory?: () => void, onSettings?: () => void }} */
     let { 
         user, 
         minimal = false,
@@ -40,7 +40,7 @@
 
 <header class="header {minimal ? 'minimal' : ''}">
     <div class="header-left">
-        <button type="button" class="btn-logo" onclick={onHome}>
+        <button type="button" class="btn-logo" onclick={() => onHome()}>
             <span class="logo-icon-small">🎬</span>
             <span class="logo-text-small">
                 <span class="go">Go</span><span class="anime">Anime</span>

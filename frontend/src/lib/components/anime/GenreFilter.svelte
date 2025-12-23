@@ -4,10 +4,10 @@
      */
     import { ANIME_GENRES } from '../../constants/genres.js';
     
-    /** @type {{ selectedGenre?: Object|null, onSelectGenre?: Function, onClear?: Function }} */
+    /** @type {{ selectedGenre?: Object|null, onSelectGenre?: (genre: any) => void, onClear?: () => void }} */
     let { 
         selectedGenre = null,
-        onSelectGenre = () => {},
+        onSelectGenre = (genre) => {},
         onClear = () => {}
     } = $props();
 </script>
@@ -16,7 +16,7 @@
     <div class="genre-header">
         <h3>🎭 Gêneros</h3>
         {#if selectedGenre}
-            <button type="button" class="btn-clear" onclick={onClear}>
+            <button type="button" class="btn-clear" onclick={() => onClear()}>
                 ✕ Limpar filtro
             </button>
         {/if}

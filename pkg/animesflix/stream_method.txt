@@ -1,0 +1,45 @@
+﻿// GetStreamURL obtém a URL de stream real de um episódio usando /resolve
+func (c *Client) GetStreamURL(episodeURL string) (string, error) {
+resolveURL := fmt.Sprintf("%s/resolve?url=%s", c.baseURL, url.QueryEscape(episodeURL))
+
+resp, err := c.httpClient.Get(resolveURL)
+if err != nil {
+return "", fmt.Errorf("erro ao resolver stream: %w", err)
+}
+defer resp.Body.Close()
+
+if resp.StatusCode != http.StatusOK {
+return "", fmt.Errorf("status %d ao resolver stream", resp.StatusCode)
+}
+
+var response struct {
+Success bool json:"success"
+Streams []struct {
+PlayURL  string json:"play_url"
+Quality  string json:"quality"
+FormatID int    json:"format_id"
+} json:"streams"
+Error string json:"error,omitempty"
+}
+
+if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+return "", fmt.Errorf("erro ao decodificar resposta: %w", err)
+}
+
+if !response.Success || len(response.Streams) == 0 {
+if response.Error != "" {
+return "", fmt.Errorf("API erro: %s", response.Error)
+}
+return "", fmt.Errorf("nenhum stream encontrado")
+}
+
+// Prefere 720p (format_id 22), senão pega o primeiro disponível
+for _, stream := range response.Streams {
+if stream.FormatID == 22 || stream.Quality == "720p" {
+return stream.PlayURL, nil
+}
+}
+
+// Fallback para o primeiro stream
+return response.Streams[0].PlayURL, nil
+}

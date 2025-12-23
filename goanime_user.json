@@ -8,7 +8,13 @@
     "start_fullscreen": true,
     "content_language": "all",
     "default_quality": "auto",
-    "use_anime4k": false
+    "use_anime4k": true,
+    "seeding_enabled": true,
+    "seeding_max_cpu": 45,
+    "seeding_max_bandwidth": 26,
+    "seeding_only_wifi": true,
+    "seeding_schedule": "always",
+    "seeding_contributed": 0
   },
   "mpv_path": "C:\\Users\\th\\Documents\\codigos\\GoAnimeGUI\\bin\\mpv.exe"
 }

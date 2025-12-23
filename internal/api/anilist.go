@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	"goanime-gui/internal/cache"
-	"goanime-gui/pkg/anilist"
+	"GoAnimeGUI/internal/cache"
+	"GoAnimeGUI/pkg/anilist"
 )
 
 // AniListAnime representa um anime com dados do AniList
